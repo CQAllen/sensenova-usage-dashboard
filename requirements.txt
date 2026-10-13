@@ -1,4 +1,4 @@
-requests
-pywebview
+requests==2.34.2
+pywebview==6.2.1
 jwcrypto==1.5.8
-cryptography<49
+cryptography==48.0.1

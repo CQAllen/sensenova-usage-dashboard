@@ -15,8 +15,8 @@
 #
 # 产物： dist/SenseNova用量查询.app   ← 这就是可分发应用
 #        双击即可运行；可拖进「应用程序」文件夹长期使用
-#        首次运行自动在可执行文件旁边（或 ~/Library/Application Support 下）生成
-#        accounts.json，在窗口内填写用户名 + 密码即可
+#        凭据（加密后的 accounts.json + 密钥）保存在
+#        ~/Library/Application Support/SenseNova用量查询/ 下，不会写进 .app
 # ============================================================
 
 set -e
@@ -86,7 +86,6 @@ echo "安装/更新依赖..."
 
 APP="SenseNova用量查询"
 APP_BUNDLE="dist/$APP.app"
-MACOS_DIR="$APP_BUNDLE/Contents/MacOS"
 
 echo "开始打包（onedir + windowed → 生成 .app，图标 app.icns）..."
 
@@ -101,28 +100,22 @@ echo "开始打包（onedir + windowed → 生成 .app，图标 app.icns）..."
   --hidden-import jwcrypto \
   --hidden-import cryptography \
   --hidden-import auth_login \
+  --hidden-import credstore \
   dashboard.py
 
-echo "写入空白账号模板到 .app（不含任何真实 Token，首次运行也可在窗口内填写）..."
-mkdir -p "$MACOS_DIR"
-cat > "$MACOS_DIR/accounts.json" <<'EOF'
-{
-  "accounts": [
-    {"username": "", "password": "", "jwt_token": ""}
-  ]
-}
-EOF
+# 版本号须与 dashboard.py 的 APP_VERSION 保持一致
+APP_VERSION="1.2.0"
 
 echo "写入版本信息到 Info.plist..."
 PLIST="$APP_BUNDLE/Contents/Info.plist"
 if [ -f "$PLIST" ]; then
-  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.0.0" "$PLIST" 2>/dev/null \
-    || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" "$PLIST"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1.0.0" "$PLIST" 2>/dev/null \
-    || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.0.0" "$PLIST"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $APP_VERSION" "$PLIST"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_VERSION" "$PLIST" 2>/dev/null \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $APP_VERSION" "$PLIST"
   /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile app" "$PLIST" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string app" "$PLIST"
-  echo "  版本号已设为 1.0.0"
+  echo "  版本号已设为 $APP_VERSION"
 fi
 
 echo "尝试 ad-hoc 签名（绕过 Gatekeeper 拦截，失败不影响使用）..."

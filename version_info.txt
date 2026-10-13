@@ -1,8 +1,8 @@
 # UTF-8
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(1, 2, 0, 0),
+    prodvers=(1, 2, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
         '080404B0',
         [StringStruct('CompanyName', ''),
          StringStruct('FileDescription', 'SenseNova 用量查询'),
-         StringStruct('FileVersion', '1.0.0.0'),
+         StringStruct('FileVersion', '1.2.0.0'),
          StringStruct('InternalName', 'SenseNova用量查询'),
          StringStruct('LegalCopyright', 'Copyright (C) 2026'),
          StringStruct('OriginalFilename', 'SenseNova用量查询.exe'),
          StringStruct('ProductName', 'SenseNova 用量查询'),
-         StringStruct('ProductVersion', '1.0.0.0')])
+         StringStruct('ProductVersion', '1.2.0.0'])
       ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])
   ]

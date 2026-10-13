@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SenseNova 用量查询</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="app">
+  <!-- 左侧菜单栏 -->
+  <aside class="sidebar">
+    <div class="brand">SenseNova 用量</div>
+    <nav class="nav">
+      <button class="nav-item active" data-page="overview" data-action="showPage">账号总览</button>
+      <button class="nav-item" data-page="detail" data-action="showPage">账号明细</button>
+      <button class="nav-item" data-page="config" data-action="showPage">账号配置</button>
+      <button class="nav-item" data-page="apikeys" data-action="showPage">API Key</button>
+      <button class="nav-item" data-page="imagegen" data-action="showPage">图像生成</button>
+      <button class="nav-item" data-page="settings" data-action="showPage">系统设置</button>
+    </nav>
+  </aside>
+
+  <!-- 右侧显示区 -->
+  <main class="main">
+    <div id="loading" class="loading"><div class="spinner"></div><p style="margin-top:10px">正在查询用量...</p></div>
+
+    <section class="page active" id="page-overview">
+      <div class="page-head">
+        <div class="page-title">账号总览</div>
+        <div class="page-head-right">
+          <span class="refresh-info" id="refreshInfo">加载中...</span>
+          <button class="btn btn-sm" id="refreshBtn" data-action="fetchUsage">刷新</button>
+        </div>
+      </div>
+      <div id="overviewBody"></div>
+    </section>
+
+    <section class="page" id="page-detail">
+      <div class="page-title">账号明细</div>
+      <div id="detailBody"></div>
+    </section>
+
+    <section class="page" id="page-config">
+      <div class="page-title">账号配置</div>
+      <div class="howto">
+        填写「用户名」「密码」后点 <b>登录</b>，自动换取并保存 JWT；约 3 小时过期后会用保存的密码自动重新登录，无需再管。<br>
+        保存后窗口不再回显密码，密码框留空即沿用已保存的密码。凭据仅加密保存在本机。
+      </div>
+      <div id="accountRows"></div>
+      <div class="config-actions">
+        <button class="btn btn-sm" data-action="addAccountRow">+ 添加账号</button>
+        <button class="btn btn-sm btn-primary" data-action="saveConfig">保存配置</button>
+        <span class="save-status" id="saveStatus">已保存</span>
+      </div>
+    </section>
+
+    <section class="page" id="page-apikeys">
+      <div class="page-head">
+        <div class="page-title">API Key 管理</div>
+        <button class="btn btn-sm" id="keysBtn" data-action="loadApiKeys">刷新</button>
+      </div>
+      <div class="howto">
+        API Key 默认脱敏显示。点 <b>显示</b> 才会向本地服务单独取一次明文，点 <b>复制</b> 可直接复制到剪贴板；
+        明文只在当前页面内存中保留，切换页面或重启后需重新获取。本页为只读，不支持新建 / 删除 Key。
+      </div>
+      <div id="keysBody"></div>
+    </section>
+
+    <section class="page" id="page-imagegen">
+      <div class="page-head">
+        <div class="page-title">图像生成</div>
+        <div class="page-head-right">
+          <span class="refresh-info">使用账号 API Key 调用</span>
+          <select id="igAccount" class="ig-account-sel"></select>
+        </div>
+      </div>
+      <div class="howto">
+        选择账号（使用其默认 API Key）→ 选择模式 → 输入提示词 → 点 <b>生成</b>。基于 SenseNova U1.5 模型。
+        <b>图片生成</b>：描述生成新图；<b>图片编辑</b>：上传参考图 + 编辑指令，第 1 张为主图（至多 5 张）。
+      </div>
+      <div class="ig-layout">
+        <div class="ig-left">
+          <div class="ig-form-row">
+            <label>模式</label>
+            <div class="ig-mode-tabs">
+              <button type="button" class="ig-tab active" data-mode="t2i" data-action="setIgMode">图片生成</button>
+              <button type="button" class="ig-tab" data-mode="i2i" data-action="setIgMode">图片编辑</button>
+            </div>
+          </div>
+          <div class="ig-form-row">
+            <label>模型</label>
+            <select id="igModel">
+              <option value="sensenova-u1.5-fast" selected>U1.5 Fast（快速，日常）</option>
+              <option value="sensenova-u1.5-lite">U1.5 Lite（高质量）</option>
+            </select>
+          </div>
+          <div class="ig-form-row">
+            <label>尺寸</label>
+            <select id="igSize">
+              <option value="auto" disabled>auto（自适应主图）</option>
+              <option value="1024x1024">1024×1024（1:1）</option>
+              <option value="2048x2048" selected>2048×2048（1:1 高清）</option>
+              <option value="1536x2720">1536×2720（9:16 手机壁纸）</option>
+              <option value="2720x1536">2720×1536（16:9 桌面壁纸）</option>
+              <option value="1664x2496">1664×2496（2:3 竖版海报）</option>
+              <option value="2496x1664">2496×1664（3:2 横版风景）</option>
+            </select>
+          </div>
+          <div class="ig-form-row ig-upload-row" id="igUploadRow" style="display:none">
+            <label>参考图（第 1 张为主图，至多 5 张）</label>
+            <div class="ig-dropzone" id="igDropzone">
+              <input type="file" id="igFileInput" accept="image/*" multiple style="display:none">
+              <div class="ig-dropzone-hint">点击选择或拖拽图片到此处</div>
+            </div>
+            <div class="ig-thumbs" id="igThumbs"></div>
+          </div>
+          <div class="ig-form-row">
+            <label id="igPromptLabel">提示词</label>
+            <textarea id="igPrompt" placeholder="例如：一只橘猫趴在书桌上，窗外的阳光，水彩画风格，温暖色调"></textarea>
+          </div>
+          <div class="ig-form-row ig-advanced">
+            <label class="ig-check"><input type="checkbox" id="igPromptExtend" checked> 自动润色提示词</label>
+            <label class="ig-check"><input type="checkbox" id="igWatermark"> 添加水印</label>
+          </div>
+          <div class="ig-form-row">
+            <button class="btn btn-primary" id="igGenBtn" data-action="generateImage">生成图像</button>
+            <button class="btn btn-sm" id="igCancelBtn" data-action="cancelImage" style="display:none">取消</button>
+            <span class="ig-hint">约需 10–30 秒，请耐心等待</span>
+          </div>
+        </div>
+        <div class="ig-right">
+          <div id="igStatus" class="ig-status"></div>
+          <div id="igResult" class="ig-result"></div>
+          <div class="ig-history-row">
+            <div class="ig-history-title">历史记录（本次会话）</div>
+            <div id="igHistory" class="ig-history"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="page" id="page-settings">
+      <div class="page-title">系统设置</div>
+      <div id="settingsBody"></div>
+    </section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
