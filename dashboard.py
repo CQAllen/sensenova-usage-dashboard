@@ -20,24 +20,29 @@ SenseNova 用量查询 - 桌面应用入口
 前端：web/index.html、web/styles.css、web/app.js
 """
 
+from __future__ import annotations
+
 import hmac
 import json
+import logging
 import os
+import re
 import secrets
 import sys
 import threading
 import time
+import urllib.request
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlsplit
+from typing import Any
 
 import auth_login
 import accounts
 import sensenova_api
 import imagegen
-import credstore
 
 
-def _fatal(title, message):
+def _fatal(title: str, message: str) -> None:
     """启动期致命错误提示：pythonw 无控制台时用原生弹窗，避免"闪退"看不到原因。"""
     try:
         import ctypes
@@ -53,7 +58,7 @@ def _fatal(title, message):
 try:
     import requests  # noqa: F401  （sensenova_api / imagegen 依赖，这里仅做启动期自检）
     import webview
-    import jwcrypto          # auth_login 依赖
+    import jwcrypto  # noqa: F401  （auth_login 依赖，这里仅做启动期自检）
 except Exception as _e:      # 缺少运行依赖：给出可执行的修复指引，而不是无声退出
     _fatal("SenseNova 用量查询 - 启动失败",
            f"缺少运行依赖：{_e}\n\n"
@@ -66,7 +71,7 @@ except Exception as _e:      # 缺少运行依赖：给出可执行的修复指�
 # ============================================================
 # 常量
 # ============================================================
-def _resolve_port():
+def _resolve_port() -> int:
     """本地服务端口：默认由系统分配（0），可用 SENSENOVA_PORT 覆盖以便排障。"""
     v = os.environ.get("SENSENOVA_PORT")
     if v:
@@ -82,6 +87,9 @@ MAX_BODY_BYTES = 64 * 1024                  # POST 请求体上限
 MAX_IMAGE_BODY_BYTES = 32 * 1024 * 1024     # 图片编辑请求体上限（最多 5 张 base64 参考图）
 APP_VERSION = "1.2.0"
 
+# 发布仓库：更新检查会查这个 repo 的 GitHub Releases 最新版
+UPDATE_REPO = "CQAllen/sensenova-usage-dashboard"
+
 # 每次启动生成的一次性会话令牌。仅用于拦截浏览器 Web 来源
 # （恶意网页 / DNS rebinding / CSRF），不对同用户的本机进程提供防护。
 AUTH_TOKEN = secrets.token_urlsafe(32)
@@ -94,13 +102,13 @@ class _Throttle:
     避免被无节制轮询 / 撞密码打爆上游接口。
     """
 
-    def __init__(self, interval, max_keys=512):
+    def __init__(self, interval: float, max_keys: int = 512):
         self._interval = interval
         self._max_keys = max_keys
         self._lock = threading.Lock()
-        self._last = {}
+        self._last: dict[str, float] = {}
 
-    def check(self, key):
+    def check(self, key: str) -> tuple[bool, float]:
         """放行返回 (True, 0.0)；否则返回 (False, 还需等待的秒数)。"""
         now = time.monotonic()
         with self._lock:
@@ -131,9 +139,10 @@ _server_port = None
 _server = None
 _server_ready = threading.Event()
 _server_error = None
+_update_info = None       # 后台更新检查结果：{latest, url} 或 None（未检查 / 无新版 / 查询失败）
 
 
-def _resource_path(name):
+def _resource_path(name: str) -> str:
     """定位 web/ 下的前端资源：打包态从 sys._MEIPASS，源码态从脚本目录。"""
     base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base, "web", name)
@@ -151,7 +160,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return self.server_version
 
     # ---------- 响应工具 ----------
-    def _security_headers(self):
+    def _security_headers(self) -> dict:
         return {
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
@@ -165,7 +174,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             ),
         }
 
-    def _send_json(self, code, obj, extra_headers=None):
+    def _send_json(self, code: int, obj: dict, extra_headers: dict | None = None) -> None:
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -178,7 +187,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_file(self, path, content_type, replace_token=False):
+    def _send_file(self, path: str, content_type: str, replace_token: bool = False) -> None:
         """读取并返回一个前端资源文件；replace_token 时把 __AUTH_TOKEN__ 替换为会话令牌。"""
         try:
             with open(path, "rb") as f:
@@ -196,7 +205,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def send_error(self, code, message=None, explain=None):
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
         """统一以 JSON 报错，避免 BaseHTTPRequestHandler 泄漏版本/实现信息。"""
         if code == 404:
             self._send_json(404, {"error": "not found"})
@@ -204,19 +213,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._send_json(code, {"error": "request rejected"})
 
     # ---------- 来源校验 ----------
-    def _allowed_hosts(self):
+    def _allowed_hosts(self) -> set:
         return {
             f"127.0.0.1:{_server_port}", f"localhost:{_server_port}",
             "127.0.0.1", "localhost",
         }
 
-    def _allowed_origins(self):
+    def _allowed_origins(self) -> set:
         return {
             f"http://127.0.0.1:{_server_port}",
             f"http://localhost:{_server_port}",
         }
 
-    def _check_request(self):
+    def _check_request(self) -> tuple[int, str] | None:
         """校验通过返回 None，否则返回 (状态码, 错误信息)。"""
         # 1) Host 头白名单：拦截把域名解析到 127.0.0.1 的 DNS rebinding
         host = (self.headers.get("Host") or "").strip().lower()
@@ -239,7 +248,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return None
 
     # ---------- 路由 ----------
-    def do_GET(self):
+    def do_GET(self) -> None:
         deny = self._check_request()
         if deny:
             self._send_json(deny[0], {"error": deny[1]})
@@ -287,6 +296,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     "api_base": sensenova_api.API_BASE,
                     "port": _server_port,
                     "version": APP_VERSION,
+                    "update": _update_info,
                 })
             except Exception as e:
                 self._send_json(500, {"error": accounts.sanitize_error(e)})
@@ -331,7 +341,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
-    def do_POST(self):
+    def do_POST(self) -> None:
         deny = self._check_request()
         if deny:
             self._send_json(deny[0], {"error": deny[1]})
@@ -397,10 +407,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not token:
                     self._send_json(200, {"success": False, "error": "登录成功但未返回 token"})
                     return
-                accounts.update_account(username, jwt_token=token, password=password,
-                                         refresh_token=res.get("refresh_token", ""),
-                                         token_acquired_at=time.time(),
-                                         token_expires_in=res.get("expires_in") or 10800)
+                accounts.update_account(
+                    username, password=password, **sensenova_api._token_updates(res, token)
+                )
                 # 绝不回传 token / 密码，只回传状态
                 self._send_json(200, {"success": True, "has_password": True, "has_token": True})
             except Exception as e:
@@ -473,14 +482,44 @@ class DashboardHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
-    def log_message(self, format, *args):
+    def log_message(self, format: str, *args: Any) -> None:
         pass
 
 
 # ============================================================
 # 主流程
 # ============================================================
-def start_server():
+# ============================================================
+# 更新检查（引导下载：发现新版则在设置页提示，点按钮打开 release 页）
+# ============================================================
+def _parse_version(s: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in re.findall(r"\d+", s or ""))
+
+
+def _check_update() -> None:
+    """后台查 GitHub 最新 release；比 APP_VERSION 新则缓存 {latest, url}。
+    网络/解析失败一律静默——更新检查是锦上添花，不能影响启动。"""
+    global _update_info
+    try:
+        url = f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+        req = urllib.request.Request(url, headers={"User-Agent": "SenseNovaDashboard"})
+        with urllib.request.urlopen(req, timeout=10) as r:  # noqa: S310
+            data = json.loads(r.read().decode("utf-8"))
+        latest = (data.get("tag_name") or "").lstrip("vV")
+        if latest and _parse_version(latest) > _parse_version(APP_VERSION):
+            _update_info = {"latest": latest, "url": data.get("html_url") or url}
+    except Exception:
+        pass
+
+
+def _start_update_check() -> None:
+    threading.Thread(target=_check_update, daemon=True).start()
+
+
+# ============================================================
+# 主流程
+# ============================================================
+def start_server() -> None:
     """启动 HTTP 服务器（后台线程）。绑定失败时记录原因并唤醒等待方。"""
     global _server, _server_port, _server_error
     try:
@@ -495,10 +534,24 @@ def start_server():
     _server.serve_forever()
 
 
-def main():
+def main() -> None:
+    # 各模块的 logger 统一落盘到配置目录：pythonw 无控制台，不写文件则告警不可见
+    try:
+        os.makedirs(accounts.BASE_DIR, exist_ok=True)
+        logging.basicConfig(
+            filename=os.path.join(accounts.BASE_DIR, "sensenova_app.log"),
+            level=logging.WARNING,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+    except Exception:
+        pass
+
     # 启动后台 HTTP 服务
     server_thread = threading.Thread(target=start_server, daemon=True)
     server_thread.start()
+
+    # 后台检查是否有新版本（结果进 /api/settings 供界面提示）
+    _start_update_check()
 
     # 等服务就绪（避免 --windowed 下静默挂起）
     _server_ready.wait(10)

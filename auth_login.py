@@ -15,6 +15,8 @@ SenseNova 自动登录模块
 依赖: requests, jwcrypto
 """
 
+from __future__ import annotations
+
 import base64
 import hashlib
 import html
@@ -24,6 +26,7 @@ import re
 import secrets
 import threading
 import time
+from typing import Any
 from urllib.parse import urlsplit
 
 import requests
@@ -47,12 +50,17 @@ JWKS_URL = "https://signin.sensecore.cn/.well-known/jwks.json"
 CLIENT_ID = "nova"
 REDIRECT_URI = "https://platform.sensenova.cn"
 SCOPE = "openid offline offline_access"
+# JWT 默认有效期（秒）：登录 / 刷新接口未返回 expires_in 时的兜底值
+DEFAULT_EXPIRES_IN = 10800
 
-_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36")
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+)
 
 # 缓存的公钥（首次获取后复用，避免每次登录都拉 JWKS）
-_pubkey_cache = {"key": None, "ts": 0}
+_pubkey_cache: dict[str, Any] = {"key": None, "ts": 0}
+_pubkey_cache_lock = threading.Lock()
 _PUBKEY_TTL = 3600
 
 # 诊断日志默认关闭：只有显式设置 SENSENOVA_AUTH_DEBUG=1 才落盘，且内容脱敏。
@@ -73,11 +81,11 @@ _BODY_SNIPPET_LIMIT = 500
 # 直接放在这里而非 dashboard.py，是为了让所有调用方（含 401 重登）都被同一把闸管住。
 MIN_LOGIN_INTERVAL = 3.0
 _LOGIN_THROTTLE_MAX = 512
-_login_throttle = {}          # ("login", 用户名) / ("refresh", refresh_token) -> 上次放行时间
+_login_throttle: dict[tuple[str, str], float] = {}          # ("login", 用户名) / ("refresh", refresh_token) -> 上次放行时间
 _login_throttle_lock = threading.Lock()
 
 
-def _login_throttled(key):
+def _login_throttled(key) -> tuple[bool, float]:
     """放行返回 (True, 0.0)，否则返回 (False, 还需等待的秒数)。
 
     /api/login 的用户名来自 HTTP 请求体、不受账号数约束，故与 _Throttle 一样做淘汰，
@@ -97,15 +105,14 @@ def _login_throttled(key):
         return False, wait
 
 
-
-def _debug_log_path():
+def _debug_log_path() -> str:
     try:
         return os.path.join(credstore.resolve_config_dir(), _DEBUG_LOG_NAME)
     except Exception:
         return _DEBUG_LOG_NAME
 
 
-def _sanitize(text, limit=_BODY_SNIPPET_LIMIT):
+def _sanitize(text: Any, limit: int = _BODY_SNIPPET_LIMIT) -> str:
     """对日志内容脱敏：遮蔽 code / challenge / token / JWT 等敏感串。"""
     if not text:
         return ""
@@ -117,7 +124,7 @@ def _sanitize(text, limit=_BODY_SNIPPET_LIMIT):
     return s[:limit]
 
 
-def _is_trusted_url(url):
+def _is_trusted_url(url: str) -> bool:
     """仅允许 https 且域名在白名单内的跳转目标。"""
     try:
         parts = urlsplit(url)
@@ -129,7 +136,7 @@ def _is_trusted_url(url):
     return any(host == h or host.endswith("." + h) for h in _TRUSTED_HOSTS)
 
 
-def _write_debug_log(hops, redirect=None, extra=""):
+def _write_debug_log(hops: list, redirect: str | None = None, extra: str = "") -> None:
     if not _DEBUG_ENABLED:
         return
     try:
@@ -153,7 +160,7 @@ def _write_debug_log(hops, redirect=None, extra=""):
         pass
 
 
-def _b64url_decode(s):
+def _b64url_decode(s: str) -> bytes:
     s += "=" * (-len(s) % 4)
     return base64.urlsafe_b64decode(s)
 
@@ -169,11 +176,14 @@ def _session():
     return s
 
 
-def get_enc_pubkey():
+def get_enc_pubkey() -> Any:
     """获取用于加密密码的 RSA 公钥（JWKS 中的 public:hydra.openid.id-token）。"""
     now = time.time()
-    if _pubkey_cache["key"] and now - _pubkey_cache["ts"] < _PUBKEY_TTL:
-        return _pubkey_cache["key"]
+    with _pubkey_cache_lock:
+        cached = _pubkey_cache["key"]
+        if cached and now - _pubkey_cache["ts"] < _PUBKEY_TTL:
+            return cached
+    # 网络拉取在锁外执行：否则并发登录会被 JWKS 请求串行化
     with _session() as s:
         resp = s.get(JWKS_URL, headers={"User-Agent": _USER_AGENT}, timeout=20)
         resp.raise_for_status()
@@ -186,8 +196,9 @@ def get_enc_pubkey():
     k = matches[0]
     # 只取 n/e 重建公钥，去掉 use/alg 约束，避免 jwcrypto 报 "Invalid usage"
     pub = jwk.JWK(kty="RSA", n=k["n"], e=k["e"])
-    _pubkey_cache["key"] = pub
-    _pubkey_cache["ts"] = now
+    with _pubkey_cache_lock:
+        _pubkey_cache["key"] = pub
+        _pubkey_cache["ts"] = now
     return pub
 
 
@@ -201,7 +212,7 @@ def encrypt_password(password: str) -> str:
     ).serialize(compact=True)
 
 
-def _pkce():
+def _pkce() -> tuple[str, str]:
     verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
     challenge = base64.urlsafe_b64encode(
         hashlib.sha256(verifier.encode()).digest()
@@ -209,7 +220,8 @@ def _pkce():
     return verifier, challenge
 
 
-def _follow_until(loc, session, predicate, max_hops=6, hops=None):
+def _follow_until(loc: str | None, session: Any, predicate: Any,
+                  max_hops: int = 6, hops: list | None = None) -> str | None:
     """
     手动跟随重定向，直到 predicate(location) 为真，返回命中的 location。
     若 Location 头里没有 code，也尝试从响应体里解析 JS/HTML 跳转或 JSON 中的 code。
@@ -302,14 +314,15 @@ def _login_once(username: str, password: str, timeout: int = 30) -> dict:
     }
     r = s.get(OIDC_AUTH, params=auth_params, allow_redirects=False, timeout=timeout)
     loc = r.headers.get("Location")
-    hops = []
+    hops: list[dict] = []
     challenge_loc = _follow_until(
         loc, s, lambda u: "login_challenge=" in u, hops=hops
     )
     if not challenge_loc:
         _write_debug_log(hops, extra=f"OIDC_AUTH response Location={loc}")
         raise RuntimeError("未能获取 login_challenge（登录流程中断，平台登录页可能改版，请更新工具）")
-    login_challenge = re.search(r"login_challenge=([^&]+)", challenge_loc).group(1)
+    # challenge_loc 已由谓词保证含 login_challenge=，re 必命中
+    login_challenge = re.search(r"login_challenge=([^&]+)", challenge_loc).group(1)  # type: ignore[union-attr]
 
     # ---- 2) 加密密码并提交登录 ----
     enc = encrypt_password(password)
@@ -352,7 +365,8 @@ def _login_once(username: str, password: str, timeout: int = 30) -> dict:
                          extra="已尝试从 Location 头和响应体（meta refresh/JS 跳转）中解析 code")
         raise RuntimeError("未能获取 authorization code（回调流程中断）")
     try:
-        authorization_code = re.search(r"[?&]code=([^&]+)", code_loc).group(1)
+        # None.group 的 AttributeError 已被下方 except 捕获
+        authorization_code = re.search(r"[?&]code=([^&]+)", code_loc).group(1)  # type: ignore[union-attr]
     except (AttributeError, IndexError):
         _write_debug_log(hops, redirect=redirect,
                          extra=f"从 code_loc 解析 code 失败：{code_loc}")
@@ -384,7 +398,7 @@ def _login_once(username: str, password: str, timeout: int = 30) -> dict:
     return {
         "access_token": access_token,
         "refresh_token": tok.get("refresh_token", ""),
-        "expires_in": int(tok.get("expires_in", 10800)),
+        "expires_in": int(tok.get("expires_in", DEFAULT_EXPIRES_IN)),
     }
 
 
@@ -443,7 +457,7 @@ def refresh(refresh_token: str, timeout: int = 30) -> dict:
     return {
         "access_token": tok["access_token"],
         "refresh_token": tok.get("refresh_token", "") or refresh_token,
-        "expires_in": int(tok.get("expires_in", 10800)),
+        "expires_in": int(tok.get("expires_in", DEFAULT_EXPIRES_IN)),
     }
 
 

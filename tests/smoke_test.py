@@ -47,12 +47,12 @@ os.environ.pop("SENSENOVA_PORT", None)
 # 关掉调试日志，测试不该往配置目录写日志
 os.environ.pop("SENSENOVA_AUTH_DEBUG", None)
 
-import credstore
-import accounts
-import dashboard
-import imagegen
-import auth_login
-import sensenova_api
+import credstore  # noqa: E402
+import accounts  # noqa: E402
+import dashboard  # noqa: E402
+import imagegen  # noqa: E402
+import auth_login  # noqa: E402
+import sensenova_api  # noqa: E402
 
 # 所有配置读写重定向到临时目录
 WORK_DIR = tempfile.mkdtemp(prefix="sn-smoke-")
@@ -318,7 +318,8 @@ imagegen.IMAGE_CACHE_MAX = 10
 imagegen.IMAGE_CACHE_TTL = 3600
 imagegen._image_cache.clear()
 try:
-    blob = lambda n: base64.b64encode(b"A" * n).decode("ascii")
+    def blob(n):
+        return base64.b64encode(b"A" * n).decode("ascii")
     ids = [imagegen.store_image_for_download(blob(700), "png", "1x1") for _ in range(4)]
     total = sum(len(v["bytes"]) for v in imagegen._image_cache.values())
     check("总字节上限生效", total <= imagegen.IMAGE_CACHE_MAX_BYTES, total)

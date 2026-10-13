@@ -18,12 +18,15 @@ SenseNova 用量查询 - 凭据安全存储模块
 对同一登录用户下的本机进程无效（它同样能读到进程内存与密钥）。
 """
 
+from __future__ import annotations
+
 import base64
 import json
 import os
 import secrets
 import sys
 import tempfile
+from typing import Any
 
 ACCOUNTS_FILE = "accounts.json"
 KEY_FILE = "accounts.key"        # 密钥文件名（*.key 已在 .gitignore 中忽略）
@@ -33,7 +36,7 @@ try:
     from cryptography.fernet import Fernet
     _HAVE_FERNET = True
 except Exception:               # 缺少加密组件时优雅降级为明文 + 告警
-    Fernet = None
+    Fernet = None  # type: ignore[assignment,misc]
     _HAVE_FERNET = False
 
 
@@ -51,7 +54,7 @@ def _is_sync_path(path):
     return any(m in p for m in _SYNC_MARKERS)
 
 
-def user_config_dir():
+def user_config_dir() -> str:
     """跨平台的用户级配置目录。"""
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or os.path.expanduser(r"~\AppData\Local")
@@ -62,7 +65,7 @@ def user_config_dir():
     return os.path.join(base, "SenseNova用量查询")
 
 
-def resolve_config_dir():
+def resolve_config_dir() -> str:
     """返回配置目录。打包态一律用用户级目录；源码态默认脚本目录，
     但若脚本目录位于云同步盘/网盘则改存用户级目录，避免凭据被同步外泄。"""
     if getattr(sys, "frozen", False):
@@ -73,14 +76,15 @@ def resolve_config_dir():
     return script_dir
 
 
-def accounts_path(config_dir):
+def accounts_path(config_dir: str) -> str:
+    """配置目录下 accounts.json 的完整路径。"""
     return os.path.join(config_dir, ACCOUNTS_FILE)
 
 
 # ============================================================
 # 原子写入 / 隔离
 # ============================================================
-def _atomic_write(path, text):
+def _atomic_write(path: str, text: str) -> None:
     d = os.path.dirname(path) or "."
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".acc-")
@@ -103,7 +107,7 @@ def _atomic_write(path, text):
             pass
 
 
-def _quarantine(path):
+def _quarantine(path: str) -> None:
     """把无法解密/解析的文件挪到 .bad，避免阻塞启动。"""
     if os.path.exists(path):
         try:
@@ -115,16 +119,16 @@ def _quarantine(path):
 # ============================================================
 # 密钥保护
 # ============================================================
-def _key_path(config_dir):
+def _key_path(config_dir: str) -> str:
     return os.path.join(config_dir, KEY_FILE)
 
 
-def _read_key_raw(config_dir):
+def _read_key_raw(config_dir: str) -> bytes:
     with open(_key_path(config_dir), "rb") as f:
         return f.read()
 
 
-def _write_key_raw(config_dir, blob):
+def _write_key_raw(config_dir: str, blob: bytes) -> None:
     path = _key_path(config_dir)
     fd, tmp = tempfile.mkstemp(dir=config_dir, prefix=".key-")
     try:
@@ -146,7 +150,7 @@ def _write_key_raw(config_dir, blob):
             pass
 
 
-def _dpapi(data, unprotect=False):
+def _dpapi(data: bytes, unprotect: bool = False) -> bytes:
     """调用 Windows DPAPI 保护/还原数据（系统 crypt32.dll，PyInstaller 下可用）。"""
     import ctypes
 
@@ -170,11 +174,11 @@ def _dpapi(data, unprotect=False):
         ctypes.windll.kernel32.LocalFree(blob_out.pbData)
 
 
-def _fernet(raw_key):
+def _fernet(raw_key: bytes):
     return Fernet(base64.urlsafe_b64encode(raw_key))
 
 
-def _get_key(config_dir):
+def _get_key(config_dir: str) -> tuple[Any, str]:
     """返回 (fernet_or_None, scheme)。密钥损坏时丢弃旧密钥并重建（旧密文由上层隔离）。"""
     if not _HAVE_FERNET:
         return None, "plain"
@@ -227,12 +231,12 @@ def _get_key(config_dir):
 # ============================================================
 # 文档读写
 # ============================================================
-def _is_envelope(doc):
+def _is_envelope(doc: Any) -> bool:
     return (isinstance(doc, dict) and doc.get("v") == ENVELOPE_VERSION
             and isinstance(doc.get("data"), str) and "scheme" in doc)
 
 
-def write_document(config_dir, obj):
+def write_document(config_dir: str, obj: dict) -> str:
     """加密（或降级为明文）写回配置文档，返回采用的 scheme。"""
     os.makedirs(config_dir, exist_ok=True)
     path = accounts_path(config_dir)
@@ -249,7 +253,7 @@ def write_document(config_dir, obj):
     return scheme
 
 
-def read_document(config_dir):
+def read_document(config_dir: str) -> tuple[dict | None, str | None]:
     """读取配置文档，返回 (obj_or_None, warning)。
 
     - 新信封：解密后返回；解密失败则隔离旧文件并返回 None + 告警

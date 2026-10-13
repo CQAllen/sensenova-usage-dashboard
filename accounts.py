@@ -7,8 +7,11 @@ SenseNova 用量查询 - 账号配置读写层
 含并发锁与配置迁移/解密类告警的暂存。sanitize_error 也放在这里供各模块复用。
 """
 
+from __future__ import annotations
+
 import re
 import threading
+from typing import Any
 
 import credstore
 
@@ -23,10 +26,10 @@ REFRESH_MIN, REFRESH_MAX = 60, 3600         # 自动刷新间隔允许范围
 
 _accounts_lock = threading.Lock()
 # 配置迁移/解密类告警，随下一次 /api/usage 一并回传给界面提示一次
-_config_warnings = []
+_config_warnings: list[str] = []
 
 
-def _read_doc():
+def _read_doc() -> tuple[dict, str | None]:
     """读取配置文档，返回 (doc, warning)。doc 始终为 dict。"""
     obj, warning = credstore.read_document(BASE_DIR)
     if warning and warning not in _config_warnings:
@@ -38,7 +41,7 @@ def _read_doc():
     return obj, warning
 
 
-def _mutate_doc(fn):
+def _mutate_doc(fn: Any) -> Any:
     """在锁内「读取 → 修改 → 写回」配置文档，返回 fn(doc) 的结果，规避并发读改写竞态。"""
     with _accounts_lock:
         doc, _ = _read_doc()
@@ -52,7 +55,7 @@ def _mutate_doc(fn):
         return result
 
 
-def _mutate_accounts(fn):
+def _mutate_accounts(fn: Any) -> Any:
     """在锁内修改账号列表，返回 fn(accounts) 的结果。"""
     def _apply(doc):
         accounts = doc.get("accounts", [])
@@ -63,13 +66,14 @@ def _mutate_accounts(fn):
     return _mutate_doc(_apply)
 
 
-def load_accounts():
+def load_accounts() -> list[dict]:
+    """返回当前配置中的账号列表（不解密无关字段，直接返回 dict 引用）。"""
     with _accounts_lock:
         doc, _ = _read_doc()
     return doc.get("accounts", [])
 
 
-def load_settings():
+def load_settings() -> dict:
     """返回合并默认值后的设置（缺失/越界字段回退到合法值）。"""
     with _accounts_lock:
         doc, _ = _read_doc()
@@ -78,19 +82,19 @@ def load_settings():
     if isinstance(stored, dict):
         settings.update({k: v for k, v in stored.items() if k in DEFAULT_SETTINGS})
     try:
-        secs = int(settings.get("refresh_seconds"))
+        secs = int(settings["refresh_seconds"])
     except (TypeError, ValueError):
         secs = AUTO_REFRESH_SECONDS
     settings["refresh_seconds"] = min(max(secs, REFRESH_MIN), REFRESH_MAX)
     return settings
 
 
-def save_settings(incoming):
+def save_settings(incoming: dict) -> dict:
     """校验并持久化设置，返回落盘后的设置。"""
     if not isinstance(incoming, dict):
         raise ValueError("settings 必须是对象")
     try:
-        secs = int(incoming.get("refresh_seconds"))
+        secs = int(incoming.get("refresh_seconds") or 0)
     except (TypeError, ValueError):
         raise ValueError("refresh_seconds 必须是整数")
     if not (REFRESH_MIN <= secs <= REFRESH_MAX):
@@ -107,7 +111,7 @@ def save_settings(incoming):
     return _mutate_doc(_apply)
 
 
-def update_account(username, **fields):
+def update_account(username: str, **fields: Any) -> None:
     """按用户名更新字段（如登录后回写 jwt_token / password 等）。"""
     def _apply(accounts):
         for a in accounts:
@@ -121,7 +125,7 @@ def update_account(username, **fields):
     _mutate_accounts(_apply)
 
 
-def merge_accounts(incoming):
+def merge_accounts(incoming: list) -> None:
     """合并前端提交的账号列表：
     - 密码留空 → 沿用已保存值（password_clear=True 才清除）
     - jwt_token 留空 → 沿用已保存值（JWT 只写不读，绝不回传浏览器）
@@ -160,7 +164,7 @@ def merge_accounts(incoming):
     _mutate_accounts(_apply)
 
 
-def pop_config_warnings():
+def pop_config_warnings() -> list[str]:
     """返回已暂存的配置告警列表并清空（供 /api/usage 路由随结果回传一次）。"""
     with _accounts_lock:
         warnings = list(_config_warnings)
@@ -168,7 +172,7 @@ def pop_config_warnings():
     return warnings
 
 
-def sanitize_error(err, limit=150):
+def sanitize_error(err: object, limit: int = 150) -> str:
     """脱敏错误信息：去除绝对路径、疑似 JWT 与超长串，避免泄漏本机信息。"""
     s = str(err)
     s = re.sub(r"[A-Za-z]:\\[^\s'\"]+", "<path>", s)

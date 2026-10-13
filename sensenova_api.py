@@ -7,17 +7,23 @@ SenseNova 用量查询 - API 查询与数据解析层
 以及遍历多账号的 _collect_accounts。依赖 accounts（配置层）与 auth_login（登录）。
 """
 
+from __future__ import annotations
+
 import base64
 import json
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from typing import Any
 
 import requests
 
 import accounts
 import auth_login
+
+_log = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 30                        # API 请求超时（秒）
 API_BASE = "https://platform.sensenova.cn"
@@ -26,7 +32,7 @@ API_KEYS_ENDPOINT = "/lite/console/v1/metered/api-keys"
 API_KEYS_PAGE_SIZE = 100                    # 单页拉取量，避免翻页
 
 
-def _jwt_exp(token: str):
+def _jwt_exp(token: str) -> int | None:
     """从 JWT payload 解码 exp 声明（Unix 时间戳），失败返回 None。"""
     if not token or token.count(".") < 2:
         return None
@@ -39,7 +45,7 @@ def _jwt_exp(token: str):
         return None
 
 
-def _auth_headers(token):
+def _auth_headers(token: str) -> dict:
     return {
         "Accept": "application/json, text/plain, */*",
         "Authorization": f"Bearer {token}",
@@ -55,7 +61,7 @@ def _session():
     return s
 
 
-def query_pool_usage(token, timeout=30):
+def query_pool_usage(token: str, timeout: int = 30) -> dict:
     with _session() as s:
         resp = s.get(API_BASE + POOL_USAGE_ENDPOINT,
                      headers=_auth_headers(token), timeout=timeout)
@@ -63,7 +69,7 @@ def query_pool_usage(token, timeout=30):
         return resp.json()
 
 
-def query_api_keys(token, timeout=30):
+def query_api_keys(token: str, timeout: int = 30) -> list:
     """拉取某账号的 Token Plan API Key 列表（含明文，仅在后端内部流转）。"""
     params = {"key_type": "API_KEY_TYPE_TOKEN_PLAN", "page_size": API_KEYS_PAGE_SIZE}
     with _session() as s:
@@ -75,7 +81,7 @@ def query_api_keys(token, timeout=30):
     return keys if isinstance(keys, list) else []
 
 
-def mask_api_key(key):
+def mask_api_key(key: str) -> str:
     """脱敏：保留前缀与末 4 位，中间用星号替代。"""
     key = (key or "").strip()
     if not key:
@@ -85,7 +91,7 @@ def mask_api_key(key):
     return key[:7] + "****" + key[-4:]
 
 
-def _iso_to_local(iso):
+def _iso_to_local(iso: Any) -> str:
     """接口返回的是 UTC ISO 时间，转成本地「YYYY-MM-DD HH:MM」；解析失败原样返回。"""
     try:
         dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
@@ -94,7 +100,7 @@ def _iso_to_local(iso):
         return str(iso or "")
 
 
-def parse_api_keys(raw_keys):
+def parse_api_keys(raw_keys: list) -> list[dict]:
     """整理成前端可用结构。明文一律丢弃，只保留脱敏值，绝不进入 HTTP 响应。"""
     out = []
     for k in raw_keys:
@@ -103,7 +109,7 @@ def parse_api_keys(raw_keys):
         out.append({
             "id": str(k.get("id") or ""),
             "name": str(k.get("displayname") or ""),
-            "masked": mask_api_key(k.get("api_key")),
+            "masked": mask_api_key(k.get("api_key") or ""),
             "status": str(k.get("status") or ""),
             "is_default": bool(k.get("is_default")),
             "create_time": _iso_to_local(k.get("create_time")),
@@ -115,11 +121,11 @@ def parse_api_keys(raw_keys):
 # 而列表在几分钟内不会变。按用户名缓存原始响应，TTL 到期或 clear_api_key_cache() 时失效。
 # JWT 不缓存——ensure_token 每次仍会校验 exp，缓存只省掉那次网络往返。
 API_KEY_CACHE_TTL = 300                   # Key 列表缓存有效期（秒）
-_api_key_cache = {}                       # username -> (过期时间戳, keys)
+_api_key_cache: dict[str, tuple[float, list]] = {}                       # username -> (过期时间戳, keys)
 _api_key_cache_lock = threading.Lock()
 
 
-def clear_api_key_cache(username=None):
+def clear_api_key_cache(username: str | None = None) -> None:
     """清 API Key 缓存；username 为 None 时清空全部。"""
     with _api_key_cache_lock:
         if username is None:
@@ -128,7 +134,7 @@ def clear_api_key_cache(username=None):
             _api_key_cache.pop((username or "").strip(), None)
 
 
-def _cached_api_keys(username, token, timeout):
+def _cached_api_keys(username: str, token: str, timeout: int) -> list:
     """带 TTL 的 query_api_keys：命中直接返回，否则拉取后写入缓存。
 
     返回的是缓存里的列表对象，调用方只读；需要修改请自行拷贝。
@@ -145,7 +151,7 @@ def _cached_api_keys(username, token, timeout):
     return keys
 
 
-def resolve_account_keys(username):
+def resolve_account_keys(username: str) -> tuple[dict, str, list]:
     """定位账号 → 确保 JWT → 取 API Key 列表（带 TTL 缓存），返回 (account, token, keys)。
     JWT 刷新结果写回加密配置。供「显示/复制明文」「图像生成」等按需取 Key 的流程复用。"""
     account = None
@@ -159,15 +165,15 @@ def resolve_account_keys(username):
     if updates:
         try:
             accounts.update_account(username, **updates)
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("写回账号 %s 的 token 刷新结果失败: %s", username, e)
     if err or not token:
         raise ValueError(err or "无法获取登录态")
     keys = _cached_api_keys(username, token, REQUEST_TIMEOUT)
     return account, token, keys
 
 
-def get_api_key_plain(username, key_id):
+def get_api_key_plain(username: str, key_id: str) -> str:
     """按需取单个 Key 的明文，仅供界面点「显示 / 复制」时一次性返回。"""
     if not username or not key_id:
         raise ValueError("参数不完整")
@@ -178,13 +184,15 @@ def get_api_key_plain(username, key_id):
     raise ValueError("未找到该 API Key")
 
 
-def fmt_num(n):
+def fmt_num(n: float) -> str:
+    """数值转带千分位的字符串：整数去小数点，非整数保留一位。"""
     if n == int(n):
         return f"{int(n):,}"
     return f"{n:,.1f}"
 
 
-def ts_to_str(ts_str):
+def ts_to_str(ts_str: Any) -> str:
+    """Unix 时间戳字符串转「MM-DD HH:MM」；无效原样返回。"""
     if not ts_str or ts_str == "0":
         return ""
     try:
@@ -194,7 +202,8 @@ def ts_to_str(ts_str):
         return str(ts_str)
 
 
-def ts_to_date(ts_str):
+def ts_to_date(ts_str: Any) -> str:
+    """Unix 时间戳字符串转「YYYY-MM-DD」；无效原样返回。"""
     if not ts_str or ts_str == "0":
         return ""
     try:
@@ -204,7 +213,7 @@ def ts_to_date(ts_str):
         return str(ts_str)
 
 
-def _to_ts(ts_str):
+def _to_ts(ts_str: Any) -> int:
     """将时间戳字符串转为 int，无效返回 0。"""
     if not ts_str or ts_str == "0":
         return 0
@@ -214,7 +223,7 @@ def _to_ts(ts_str):
         return 0
 
 
-def parse_pool_data(raw):
+def parse_pool_data(raw: dict) -> list[dict]:
     results = []
     pools = raw.get("pools") or []
     if isinstance(pools, dict):
@@ -230,8 +239,8 @@ def parse_pool_data(raw):
         if len(model_ids) > 3:
             model_display += f" 等{len(model_ids)}个"
 
-        w5h = pool.get("window_5h", {})
-        w7d = pool.get("window_7d", {})
+        w5h = pool.get("window_5h") or {}
+        w7d = pool.get("window_7d") or {}
 
         try:
             limit_5h = float(w5h.get("limit", "0"))
@@ -281,7 +290,7 @@ def parse_pool_data(raw):
     return results
 
 
-def ensure_token(account, timeout):
+def ensure_token(account: dict, timeout: int) -> tuple[str | None, dict | None, str | None]:
     """确保 account 持有可用 JWT：无 token 或即将过期时刷新。
     优先用 refresh_token 刷新（更轻、不易触发风控），失败降级为账号密码登录。
     返回 (token, updates, error)：
@@ -312,12 +321,8 @@ def ensure_token(account, timeout):
             new_token = res.get("access_token", "")
             if new_token:
                 account["jwt_token"] = new_token  # 让本次查询立即可用
-                return new_token, {
-                    "jwt_token": new_token,
-                    "refresh_token": res.get("refresh_token", "") or rt,
-                    "token_acquired_at": time.time(),
-                    "token_expires_in": res.get("expires_in") or 10800,
-                }, None
+                return new_token, _token_updates(res, new_token,
+                                                 refresh_token_fallback=rt), None
         except Exception:
             pass  # refresh 失败（平台不支持 / token 失效），降级密码登录
 
@@ -336,15 +341,23 @@ def ensure_token(account, timeout):
     if not new_token:
         return token, None, "自动登录未返回 token"
     account["jwt_token"] = new_token  # 让本次查询立即可用
-    return new_token, {
-        "jwt_token": new_token,
-        "refresh_token": res.get("refresh_token", ""),
+    return new_token, _token_updates(res, new_token), None
+
+
+def _token_updates(res: dict, token: str, refresh_token_fallback: str = "") -> dict:
+    """把登录 / 刷新接口响应转成写回配置的 token 字段，供各登录分支复用。
+
+    refresh_token 未随响应轮换时（刷新接口通常如此）沿用旧值。
+    """
+    return {
+        "jwt_token": token,
+        "refresh_token": res.get("refresh_token", "") or refresh_token_fallback,
         "token_acquired_at": time.time(),
-        "token_expires_in": res.get("expires_in") or 10800,
-    }, None
+        "token_expires_in": res.get("expires_in") or auth_login.DEFAULT_EXPIRES_IN,
+    }
 
 
-def parse_plan(raw):
+def parse_plan(raw: dict) -> str:
     """取账号当前套餐的显示名（如 "Free Plan"）；字段缺失时返回空串。"""
     plan = raw.get("plan")
     if not isinstance(plan, dict):
@@ -352,7 +365,7 @@ def parse_plan(raw):
     return str(plan.get("name") or plan.get("id") or "").strip()
 
 
-def _process_one(account, fetch, empty, timeout):
+def _process_one(account: dict, fetch: Any, empty: dict | None, timeout: int) -> tuple[str, dict, dict | None]:
     """处理单个账号：取登录态 → fetch → 401 重登一次。返回 (name, entry, updates_or_None)。
     每个账号只动自己的 dict，互不交叉，可并发执行。"""
     name = (account.get("username") or "未知").strip()
@@ -379,12 +392,7 @@ def _process_one(account, fetch, empty, timeout):
             try:
                 res = auth_login.login(account["username"], account["password"], timeout)
                 token = res.get("access_token", "")
-                upd = {
-                    "jwt_token": token,
-                    "refresh_token": res.get("refresh_token", ""),
-                    "token_acquired_at": time.time(),
-                    "token_expires_in": res.get("expires_in") or 10800,
-                }
+                upd = _token_updates(res, token)
                 entry = {"username": name, "error": None}
                 entry.update(fetch(token, timeout))
                 return name, entry, upd
@@ -408,7 +416,7 @@ def _process_one(account, fetch, empty, timeout):
         return name, entry, (updates or None)
 
 
-def _collect_accounts(fetch, empty=None):
+def _collect_accounts(fetch: Any, empty: dict | None = None) -> list[dict]:
     """遍历所有账号并发查询：取登录态 → fetch → 401 重登。
     每账号一线程（上限 8），结果按账号顺序返回；token 刷新结果写回加密配置。"""
     timeout = REQUEST_TIMEOUT
@@ -431,13 +439,13 @@ def _collect_accounts(fetch, empty=None):
     for uname, updates in pending_updates.items():
         try:
             accounts.update_account(uname, **updates)
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("写回账号 %s 的自动登录结果失败: %s", uname, e)
 
     return results
 
 
-def query_all_accounts():
+def query_all_accounts() -> dict:
     """各账号的积分池用量与当前套餐。"""
     def _fetch(token, timeout):
         raw = query_pool_usage(token, timeout)
@@ -447,7 +455,7 @@ def query_all_accounts():
             "accounts": _collect_accounts(_fetch, empty={"items": []})}
 
 
-def query_all_api_keys():
+def query_all_api_keys() -> dict:
     """各账号的 API Key 列表（只含脱敏值）。"""
     # 用户主动刷新的这份列表应当是最新的，顺带清掉 per-account 缓存，
     # 让随后的图像生成 / 显示明文也走新的数据，而不是用到旧缓存

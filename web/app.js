@@ -3,6 +3,8 @@ var AUTH_TOKEN = "__AUTH_TOKEN__";
 var REFRESH_OPTIONS = [[60,'1 分钟'],[300,'5 分钟'],[600,'10 分钟'],[900,'15 分钟'],[1800,'30 分钟']];
 var refreshSec = 300;
 var countdown = refreshSec;
+var fetchBusy = false;   // 防止慢查询期间定时器 / 手动刷新并发发起，多个请求互相覆盖渲染
+var _updateUrl = null;   // 设置页加载时写入：发现新版本时的 release 页地址
 
 // 左侧菜单切换
 function showPage(name) {
@@ -99,11 +101,35 @@ function addAccountRow(username, hasPassword) {
   var div = document.createElement('div');
   div.className = 'config-row';
   div.dataset.hasPassword = hasPassword ? '1' : '';
+  div.dataset.clearPass = '';
   div.dataset.origUser = username || '';
   div.innerHTML = '<div class="col-user"><input type="text" placeholder="用户名" value="' + escHtml(username) + '"></div>' +
     '<div class="col-pass"><input type="password" placeholder="' + (hasPassword ? '留空沿用已保存密码' : '密码') + '" value=""></div>' +
-    '<div class="col-actions"><button class="btn btn-sm btn-primary" data-action="loginAccount">登录</button><button class="btn btn-sm" data-action="removeRow" style="color:#f5222d">删</button></div>';
+    '<div class="col-actions"><button class="btn btn-sm btn-primary" data-action="loginAccount">登录</button>' +
+    '<button class="btn btn-sm" data-action="clearPass" title="保存时清除已保存的密码" style="color:#faad14;display:none">清密码</button>' +
+    '<button class="btn btn-sm" data-action="removeRow" style="color:#f5222d">删</button></div>';
   container.appendChild(div);
+  updateClearBtn(div);
+}
+
+// 「清密码」按钮可见性：仅当该行有已保存密码、未在输入新密码、且未标记清除时显示
+function updateClearBtn(row) {
+  var cp = row.querySelector('[data-action="clearPass"]');
+  if (!cp) return;
+  var hasPwd = row.dataset.hasPassword === '1';
+  var typing = !!row.querySelector('.col-pass input').value;
+  var marked = row.dataset.clearPass === '1';
+  cp.style.display = (hasPwd && !typing && !marked) ? '' : 'none';
+}
+
+// 标记本行在保存时清除已保存的密码（不立即生效，需点「保存配置」）
+function clearPass(btn) {
+  var row = btn.closest('.config-row');
+  var passInput = row.querySelector('.col-pass input');
+  passInput.value = '';
+  passInput.placeholder = '保存后清除已保存密码';
+  row.dataset.clearPass = '1';
+  updateClearBtn(row);
 }
 
 function removeRow(btn) { btn.closest('.config-row').remove(); }
@@ -119,7 +145,12 @@ function collectAccounts() {
     var password = row.querySelector('.col-pass input').value;
     var item = {username: username};
     // 密码留空表示沿用已保存的密码（服务端不会覆盖）；不提交 jwt_token
-    if (password) item.password = password;
+    if (password) {
+      item.password = password;
+    } else if (row.dataset.clearPass === '1') {
+      // 已标记清除：保存时让服务端把该账号已存密码置空
+      item.password_clear = true;
+    }
     accounts.push(item);
   });
   return accounts;
@@ -139,6 +170,8 @@ async function loginAccount(btn) {
       passInput.value = '';
       passInput.placeholder = '留空沿用已保存密码';
       row.dataset.hasPassword = '1';
+      row.dataset.clearPass = '';
+      updateClearBtn(row);
       btn.textContent = '已登录'; btn.style.color = '#52c41a';
       await fetchUsage();
     } else { btn.textContent = '失败'; btn.style.color = '#f5222d'; alert('登录失败: ' + (data.error || '未知')); }
@@ -172,7 +205,7 @@ async function saveConfig() {
       throw new Error(ej.error || ('HTTP ' + resp.status));
     }
     var data = await resp.json();
-    if (data.success) { var s = document.getElementById('saveStatus'); s.classList.add('show'); setTimeout(function() { s.classList.remove('show'); }, 2000); fetchUsage(); }
+    if (data.success) { var s = document.getElementById('saveStatus'); s.classList.add('show'); setTimeout(function() { s.classList.remove('show'); }, 2000); await loadConfigRows(); fetchUsage(); }
     else { alert('保存失败: ' + (data.error || '')); }
   } catch(e) { alert('保存失败: ' + e.message); }
 }
@@ -187,6 +220,8 @@ async function loadConfigRows() {
 }
 
 async function fetchUsage() {
+  if (fetchBusy) return;   // 已有在途查询，跳过本次（手动刷新 / 定时刷新 / 登录后刷新共用）
+  fetchBusy = true;
   var btn = document.getElementById('refreshBtn');
   btn.disabled = true; btn.textContent = '查询中...';
   document.getElementById('refreshInfo').textContent = '查询中...';
@@ -208,7 +243,7 @@ async function fetchUsage() {
     document.getElementById('overviewBody').innerHTML =
       '<div class="tip" style="background:#fff1f0;border-color:#ffccc7;color:#f5222d">查询失败: ' + escHtml(e.message) + '</div>';
     document.getElementById('detailBody').innerHTML = '';
-  } finally { btn.disabled = false; btn.textContent = '刷新'; }
+  } finally { fetchBusy = false; btn.disabled = false; btn.textContent = '刷新'; }
 }
 
 function bar(pct) {
@@ -445,7 +480,7 @@ function renderDetail(data) {
 }
 
 // ---------- API Key 管理 ----------
-// id -> 明文缓存，仅存活于当前页面内存
+// 按 user+id 复合键缓存明文，避免不同账号 id 撞号时串明文；仅存活于当前页面内存
 var keyPlainCache = {};
 // /api/keys 结果缓存：60 秒内复用，避免每次进页/图像页取 Key 数都重拉
 var _keysCache = null;
@@ -540,12 +575,13 @@ function copyText(text) {
 
 // 按需取明文：只在首次点「显示 / 复制」时请求一次，之后用内存缓存
 async function fetchKeyPlain(id, user) {
-  if (keyPlainCache[id]) return keyPlainCache[id];
+  var ck = (user || '') + '\x00' + (id || '');   // 复合键：账号 + key id
+  if (keyPlainCache[ck]) return keyPlainCache[ck];
   var resp = await apiFetch('/api/apikey?username=' + encodeURIComponent(user || '') +
                             '&id=' + encodeURIComponent(id));
   var d = await resp.json();
   if (!resp.ok || !d.api_key) throw new Error(d.error || '获取明文失败');
-  keyPlainCache[id] = d.api_key;
+  keyPlainCache[ck] = d.api_key;
   return d.api_key;
 }
 
@@ -555,7 +591,7 @@ async function onKeyAction(ev) {
   var id = btn.getAttribute('data-id');
   var user = btn.getAttribute('data-user');
   var act = btn.getAttribute('data-act');
-  var code = document.querySelector('code.key-mono[data-mid="' + id + '"]');
+  var code = btn.parentElement.querySelector('code.key-mono');
   var restore = btn.innerHTML;
   try {
     var plain = await fetchKeyPlain(id, user);
@@ -888,6 +924,14 @@ function flashDownloadBtn(text) {
 }
 
 // ---------- 系统设置 ----------
+// 用系统浏览器打开 release 页（优先走 pywebview 桥接，回退到 window.open）
+async function openUpdateUrl(url) {
+  if (window.pywebview && window.pywebview.api && typeof window.pywebview.api.open_url === 'function') {
+    try { var r = await window.pywebview.api.open_url(url); if (r && r.ok) return; } catch (e) { /* 回退 */ }
+  }
+  window.open(url, '_blank');
+}
+
 async function loadSettings() {
   var box = document.getElementById('settingsBody');
   box.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
@@ -930,8 +974,16 @@ async function loadSettings() {
          '<li><span class="ok">✔</span>一次性会话令牌（仅拦截浏览器来源）</li>' +
          '</ul></div>';
 
+    var updateRow = '';
+    if (d.update) {
+      _updateUrl = d.update.url || '';
+      updateRow = '<div class="settings-row"><span class="k">更新</span>' +
+        '<span class="v" style="color:#faad14">发现新版本 v' + escHtml(d.update.latest || '') +
+        '</span> <button class="btn btn-sm btn-primary" data-action="openUpdate">去下载</button></div>';
+    }
     h += '<div class="settings-card"><div class="settings-title">关于</div>' +
          '<div class="settings-row"><span class="k">版本</span><span class="v">' + escHtml(d.version) + '</span></div>' +
+         updateRow +
          '<div class="settings-row"><span class="k">说明</span><span class="v">仅在本机运行，凭据不上传；JWT 过期后会用保存的账号密码自动重登。</span></div></div>';
 
     box.innerHTML = h;
@@ -1006,6 +1058,19 @@ document.getElementById('keysBody').addEventListener('click', onKeyAction);
   });
 })();
 
+// 账号配置：在密码框输入新密码时，撤销此前点「清密码」设的清除标记
+document.getElementById('accountRows').addEventListener('input', function(ev) {
+  if (!ev.target.matches || !ev.target.matches('.col-pass input')) return;
+  var row = ev.target.closest('.config-row');
+  if (!row || !ev.target.value) return;
+  if (row.dataset.clearPass === '1') {
+    row.dataset.clearPass = '';
+    row.querySelector('.col-pass input').placeholder =
+      row.dataset.hasPassword === '1' ? '留空沿用已保存密码' : '密码';
+    updateClearBtn(row);
+  }
+});
+
 // 全局点击委托：所有 [data-action] 按钮统一分发，避免内联 onclick（CSP 可去 'unsafe-inline'）
 document.addEventListener('click', function(ev) {
   var el = ev.target.closest ? ev.target.closest('[data-action]') : null;
@@ -1017,12 +1082,14 @@ document.addEventListener('click', function(ev) {
     case 'saveConfig': saveConfig(); break;
     case 'loginAccount': loginAccount(el); break;
     case 'removeRow': removeRow(el); break;
+    case 'clearPass': clearPass(el); break;
     case 'loadApiKeys': loadApiKeys(true); break;
     case 'setIgMode': setIgMode(el.getAttribute('data-mode') || 't2i'); break;
     case 'generateImage': generateImage(); break;
     case 'cancelImage': cancelImage(); break;
     case 'downloadImage': downloadImage(); break;
     case 'saveSettings': saveSettings(); break;
+    case 'openUpdate': if (_updateUrl) openUpdateUrl(_updateUrl); break;
   }
 });
 

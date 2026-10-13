@@ -8,6 +8,8 @@ SenseNova 用量查询 - 图像生成 / 编辑 / 下载层
 /api/imagedl 与 pywebview 桥接（ImageApi）原生保存。
 """
 
+from __future__ import annotations
+
 import base64
 import re
 import secrets
@@ -27,7 +29,7 @@ IMAGE_EDIT_ENDPOINT = "/v1/images/edits"
 IMAGE_REQUEST_TIMEOUT = 180                 # 4K / Lite 出图较慢，留足余量
 
 # 生成图下载缓存：dl_id -> {bytes, fmt, size, ts}，供 /api/imagedl 原生下载
-_image_cache = {}
+_image_cache: dict[str, dict] = {}
 _image_cache_lock = threading.Lock()
 IMAGE_CACHE_TTL = 3600                      # 缓存有效期（秒）
 IMAGE_CACHE_MAX = 50                         # 缓存条数上限，超出清最旧
@@ -42,12 +44,12 @@ _IMAGE_TRUSTED_HOSTS = ("sensenova.dev", "sensenova.cn", "sensecoreapi.cn")
 ALLOWED_IMAGE_FMTS = ("png", "jpeg", "jpg", "webp")
 
 
-def _sanitize_image_fmt(fmt):
+def _sanitize_image_fmt(fmt: str) -> str:
     f = (fmt or "").strip().lower()
     return f if f in ALLOWED_IMAGE_FMTS else "png"
 
 
-def _valid_image_size(size):
+def _valid_image_size(size: str) -> bool:
     """校验尺寸：auto 或 WIDTHxHEIGHT（宽高为 32 倍数、512–4096、比例 ≤ 3:1）。"""
     if not size or size == "auto":
         return True
@@ -63,7 +65,7 @@ def _valid_image_size(size):
     return ratio <= 3.0
 
 
-def _is_trusted_image_url(url):
+def _is_trusted_image_url(url: str) -> bool:
     """仅允许 https 且落在商汤可信域名的图像下载地址，防 SSRF。"""
     try:
         parts = urlsplit(url)
@@ -82,7 +84,7 @@ def _session():
     return s
 
 
-def _post_image_api(api_key, endpoint, payload):
+def _post_image_api(api_key: str, endpoint: str, payload: dict) -> dict:
     """统一调用图像接口：POST + 状态码检查 + 错误解析。成功返回 JSON dict。"""
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -104,7 +106,7 @@ def _post_image_api(api_key, endpoint, payload):
         return resp.json()
 
 
-def _extract_image_data(data, size):
+def _extract_image_data(data: dict, size: str) -> dict:
     """从响应里取 base64 图像数据；兼容个别情况下返回 url（后端代为下载转 base64）。"""
     items = data.get("data") or []
     if not items or not isinstance(items[0], dict):
@@ -130,11 +132,11 @@ def _extract_image_data(data, size):
     if not b64:
         raise ValueError("图像生成返回无图像数据")
     # output_format 来自外部响应，白名单过滤以防头注入 / 异常 MIME
-    fmt = _sanitize_image_fmt(data.get("output_format"))
+    fmt = _sanitize_image_fmt(data.get("output_format") or "")
     return {"b64": b64, "output_format": fmt, "size": data.get("size") or size}
 
 
-def store_image_for_download(b64, fmt, size):
+def store_image_for_download(b64: str, fmt: str, size: str | None) -> str:
     """把生成结果缓存为可下载的原始字节，返回 dl_id 供前端跳转 /api/imagedl 下载。
     用字节缓存而非 base64，避免下载时重复解码；同时顺带清理过期项。"""
     dl_id = secrets.token_urlsafe(16)
@@ -163,13 +165,14 @@ def store_image_for_download(b64, fmt, size):
     return dl_id
 
 
-def get_cached_image(dl_id):
+def get_cached_image(dl_id: str) -> dict | None:
     """返回缓存项 {bytes, fmt, size} 或 None（供 /api/imagedl 路由与 ImageApi 共用）。"""
     with _image_cache_lock:
         return _image_cache.get(dl_id)
 
 
-def generate_image(api_key, prompt, size, model, watermark=False, prompt_extend=True):
+def generate_image(api_key: str, prompt: str, size: str, model: str,
+                   watermark: bool = False, prompt_extend: bool = True) -> dict:
     """调用 SenseNova U1.5 图片生成接口，返回 {b64, output_format, size}。
     使用 b64_json 直接取回图像数据，避免临时 URL 24 小时失效与 CSP 限制。"""
     if not api_key:
@@ -192,7 +195,8 @@ def generate_image(api_key, prompt, size, model, watermark=False, prompt_extend=
     return _extract_image_data(data, size)
 
 
-def edit_image(api_key, prompt, image_data_urls, size, model, watermark=False, prompt_extend=True):
+def edit_image(api_key: str, prompt: str, image_data_urls: list, size: str, model: str,
+               watermark: bool = False, prompt_extend: bool = True) -> dict:
     """调用 SenseNova U1.5 图片编辑接口。
     image_data_urls 为 base64 data URL 列表，第 1 张为主编辑图，至多 5 张。"""
     if not api_key:
@@ -224,7 +228,7 @@ def edit_image(api_key, prompt, image_data_urls, size, model, watermark=False, p
     return _extract_image_data(data, size)
 
 
-def get_default_api_key(username):
+def get_default_api_key(username: str) -> str:
     """取某账号的默认（或首个）Token Plan API Key 明文，用于图像生成等调用。"""
     _, _, keys = sensenova_api.resolve_account_keys(username)
     if not keys:
@@ -242,7 +246,16 @@ def get_default_api_key(username):
 class ImageApi:
     """暴露给前端 window.pywebview.api 的下载接口。"""
 
-    def save_image(self, dl_id):
+    def open_url(self, url: str) -> dict:
+        """用系统默认浏览器打开外链（用于「下载新版本」等）。"""
+        import webbrowser
+        try:
+            webbrowser.open(url)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": accounts.sanitize_error(e, 120)}
+
+    def save_image(self, dl_id: str) -> dict:
         item = get_cached_image(dl_id)
         if not item or not item.get("bytes"):
             return {"ok": False, "error": "图片已过期或不存在，请重新生成"}
@@ -272,4 +285,3 @@ class ImageApi:
             return {"ok": True, "path": path}
         except Exception as e:
             return {"ok": False, "error": accounts.sanitize_error(e, 120)}
-

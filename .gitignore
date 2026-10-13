@@ -18,6 +18,7 @@ accounts.key
 *.enc
 *.bad
 auth_login_last_error.log
+sensenova_app.log
 
 # IDE
 .idea/
