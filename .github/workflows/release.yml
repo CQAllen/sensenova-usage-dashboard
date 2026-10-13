@@ -1,0 +1,43 @@
+name: release
+
+# 打 tag（v*）即触发：在 Windows/macOS runner 上分别打包，把产物挂到一个 GitHub Release。
+# 之后本地只要：git tag v1.3.0 && git push origin v1.3.0
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # softprops/action-gh-release 创建 Release 需要
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements.txt pyinstaller
+      - run: python build_win.py
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SenseNova用量查询.exe
+          generate_release_notes: true
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # setup-python 提供的是 framework 构建（python.org 版），pywebview 的 Cocoa 后端需要它
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: chmod +x build_mac.sh && ./build_mac.sh
+      - name: 打包 .app 为 zip
+        run: cd dist && zip -r -y "SenseNova用量查询-mac.zip" "SenseNova用量查询.app"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SenseNova用量查询-mac.zip
+          generate_release_notes: true
