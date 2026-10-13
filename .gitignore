@@ -4,13 +4,20 @@ __pycache__/
 *.pyo
 *.pyd
 
+# 虚拟环境（启动.bat 自动创建）
+.venv/
+
 # PyInstaller
 build/
 dist/
 *.egg-info/
 
-# 敏感配置（含账号密码 / JWT，严禁提交）
+# 敏感配置（含加密后的账号密码 / JWT 与密钥，严禁提交）
 accounts.json
+accounts.key
+*.enc
+*.bad
+auth_login_last_error.log
 
 # IDE
 .idea/

@@ -1,0 +1,4 @@
+requests
+pywebview
+jwcrypto==1.5.8
+cryptography<49
