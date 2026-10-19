@@ -534,6 +534,31 @@ def start_server() -> None:
     _server.serve_forever()
 
 
+class AppApi(imagegen.ImageApi):
+    """前端 js_api 桥：继承 ImageApi 的下载功能，并增加窗口控制。"""
+    _maximized = False
+
+    def minimize_window(self):
+        if webview.windows:
+            webview.windows[0].minimize()
+
+    def toggle_maximize_window(self):
+        if not webview.windows:
+            return False
+        w = webview.windows[0]
+        if AppApi._maximized:
+            w.restore()
+            AppApi._maximized = False
+        else:
+            w.maximize()
+            AppApi._maximized = True
+        return AppApi._maximized
+
+    def close_window(self):
+        if webview.windows:
+            webview.windows[0].destroy()
+
+
 def main() -> None:
     # 各模块的 logger 统一落盘到配置目录：pythonw 无控制台，不写文件则告警不可见
     try:
@@ -570,16 +595,18 @@ def main() -> None:
     url = f"http://127.0.0.1:{_server_port}"
     print(f"Server ready at {url}")
 
-    # 创建原生窗口（左右布局：左侧菜单 170px + 右侧内容区）
-    # 宽度需保证「各账号使用情况」7 列表头不换行：表格 max-content ≈ 895px + 菜单 170px + 内边距 32px ≈ 1097px
+    # 创建原生窗口（无边框，自定义标题栏）
+    # 宽度需保证「各账号使用情况」7 列表头不换行：7 列约 1010px + 卡片内边距 36px + 菜单 170px + 外边距 32px ≈ 1248px
     webview.create_window(
         title="SenseNova 用量查询",
         url=url,
-        width=1180,
-        height=660,
-        min_size=(1100, 560),
+        width=1440,
+        height=860,
+        min_size=(1280, 720),
+        frameless=True,
+        easy_drag=False,
         text_select=True,
-        js_api=imagegen.ImageApi(),
+        js_api=AppApi(),
     )
 
     # 启动窗口（阻塞，关闭窗口即退出程序）

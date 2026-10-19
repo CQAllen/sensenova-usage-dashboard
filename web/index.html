@@ -7,12 +7,22 @@
 <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
+<div class="titlebar">
+  <div class="titlebar-drag pywebview-drag-region">
+    <span class="titlebar-title">SenseNova 用量查询</span>
+  </div>
+  <div class="titlebar-controls">
+    <button class="titlebar-btn" id="winMinBtn" aria-label="最小化" title="最小化">&#8722;</button>
+    <button class="titlebar-btn" id="winMaxBtn" aria-label="最大化" title="最大化">&#9633;</button>
+    <button class="titlebar-btn titlebar-close" id="winCloseBtn" aria-label="关闭" title="关闭">&#10005;</button>
+  </div>
+</div>
 <div class="app">
   <!-- 左侧菜单栏 -->
   <aside class="sidebar">
-    <div class="brand">SenseNova 用量</div>
-    <nav class="nav">
-      <button class="nav-item active" data-page="overview" data-action="showPage">账号总览</button>
+    <h1 class="brand">SenseNova 用量</h1>
+    <nav class="nav" aria-label="主导航">
+      <button class="nav-item active" data-page="overview" data-action="showPage" aria-current="page">账号总览</button>
       <button class="nav-item" data-page="detail" data-action="showPage">账号明细</button>
       <button class="nav-item" data-page="config" data-action="showPage">账号配置</button>
       <button class="nav-item" data-page="apikeys" data-action="showPage">API Key</button>
@@ -23,13 +33,13 @@
 
   <!-- 右侧显示区 -->
   <main class="main">
-    <div id="loading" class="loading"><div class="spinner"></div><p style="margin-top:10px">正在查询用量...</p></div>
+    <div id="loading" class="loading"><div class="spinner" aria-hidden="true"></div><p style="margin-top:10px">正在查询用量...</p></div>
 
     <section class="page active" id="page-overview">
       <div class="page-head">
-        <div class="page-title">账号总览</div>
+        <h2 class="page-title">账号总览</h2>
         <div class="page-head-right">
-          <span class="refresh-info" id="refreshInfo">加载中...</span>
+          <span class="refresh-info" id="refreshInfo" aria-live="polite">加载中...</span>
           <button class="btn btn-sm" id="refreshBtn" data-action="fetchUsage">刷新</button>
         </div>
       </div>
@@ -37,12 +47,12 @@
     </section>
 
     <section class="page" id="page-detail">
-      <div class="page-title">账号明细</div>
+      <h2 class="page-title">账号明细</h2>
       <div id="detailBody"></div>
     </section>
 
     <section class="page" id="page-config">
-      <div class="page-title">账号配置</div>
+      <h2 class="page-title">账号配置</h2>
       <div class="howto">
         填写「用户名」「密码」后点 <b>登录</b>，自动换取并保存 JWT；约 3 小时过期后会用保存的密码自动重新登录，无需再管。<br>
         保存后窗口不再回显密码，密码框留空即沿用已保存的密码。凭据仅加密保存在本机。
@@ -50,14 +60,14 @@
       <div id="accountRows"></div>
       <div class="config-actions">
         <button class="btn btn-sm" data-action="addAccountRow">+ 添加账号</button>
-        <button class="btn btn-sm btn-primary" data-action="saveConfig">保存配置</button>
+        <button class="btn btn-sm btn-primary" id="saveConfigBtn" data-action="saveConfig">保存配置</button>
         <span class="save-status" id="saveStatus">已保存</span>
       </div>
     </section>
 
     <section class="page" id="page-apikeys">
       <div class="page-head">
-        <div class="page-title">API Key 管理</div>
+        <h2 class="page-title">API Key 管理</h2>
         <button class="btn btn-sm" id="keysBtn" data-action="loadApiKeys">刷新</button>
       </div>
       <div class="howto">
@@ -69,9 +79,9 @@
 
     <section class="page" id="page-imagegen">
       <div class="page-head">
-        <div class="page-title">图像生成</div>
+        <h2 class="page-title">图像生成</h2>
         <div class="page-head-right">
-          <span class="refresh-info">使用账号 API Key 调用</span>
+          <label class="refresh-info" for="igAccount">使用账号 API Key 调用</label>
           <select id="igAccount" class="ig-account-sel"></select>
         </div>
       </div>
@@ -83,20 +93,20 @@
         <div class="ig-left">
           <div class="ig-form-row">
             <label>模式</label>
-            <div class="ig-mode-tabs">
-              <button type="button" class="ig-tab active" data-mode="t2i" data-action="setIgMode">图片生成</button>
-              <button type="button" class="ig-tab" data-mode="i2i" data-action="setIgMode">图片编辑</button>
+            <div class="ig-mode-tabs" role="tablist">
+              <button type="button" class="ig-tab active" data-mode="t2i" data-action="setIgMode" role="tab" aria-selected="true">图片生成</button>
+              <button type="button" class="ig-tab" data-mode="i2i" data-action="setIgMode" role="tab" aria-selected="false">图片编辑</button>
             </div>
           </div>
           <div class="ig-form-row">
-            <label>模型</label>
+            <label for="igModel">模型</label>
             <select id="igModel">
               <option value="sensenova-u1.5-fast" selected>U1.5 Fast（快速，日常）</option>
               <option value="sensenova-u1.5-lite">U1.5 Lite（高质量）</option>
             </select>
           </div>
           <div class="ig-form-row">
-            <label>尺寸</label>
+            <label for="igSize">尺寸</label>
             <select id="igSize">
               <option value="auto" disabled>auto（自适应主图）</option>
               <option value="1024x1024">1024×1024（1:1）</option>
@@ -116,7 +126,7 @@
             <div class="ig-thumbs" id="igThumbs"></div>
           </div>
           <div class="ig-form-row">
-            <label id="igPromptLabel">提示词</label>
+            <label for="igPrompt" id="igPromptLabel">提示词</label>
             <textarea id="igPrompt" placeholder="例如：一只橘猫趴在书桌上，窗外的阳光，水彩画风格，温暖色调"></textarea>
           </div>
           <div class="ig-form-row ig-advanced">
@@ -130,7 +140,7 @@
           </div>
         </div>
         <div class="ig-right">
-          <div id="igStatus" class="ig-status"></div>
+          <div id="igStatus" class="ig-status" aria-live="polite"></div>
           <div id="igResult" class="ig-result"></div>
           <div class="ig-history-row">
             <div class="ig-history-title">历史记录（本次会话）</div>
@@ -141,9 +151,11 @@
     </section>
 
     <section class="page" id="page-settings">
-      <div class="page-title">系统设置</div>
+      <h2 class="page-title">系统设置</h2>
       <div id="settingsBody"></div>
     </section>
+
+    <div id="toastContainer" class="toast-container" aria-live="polite"></div>
   </main>
 </div>
 <script src="/static/app.js"></script>

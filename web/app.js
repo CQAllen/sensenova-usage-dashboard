@@ -5,18 +5,52 @@ var refreshSec = 300;
 var countdown = refreshSec;
 var fetchBusy = false;   // 防止慢查询期间定时器 / 手动刷新并发发起，多个请求互相覆盖渲染
 var _updateUrl = null;   // 设置页加载时写入：发现新版本时的 release 页地址
+var _lastWarning = null; // 去重：同一条配置告警不重复弹
+
+// ---------- Toast 通知 ----------
+function showToast(msg, type, ms) {
+  type = type || 'info';
+  ms = ms || (type === 'error' ? 5000 : 3000);
+  var c = document.getElementById('toastContainer');
+  if (!c) return;
+  var t = document.createElement('div');
+  t.className = 'toast toast-' + type;
+  // 先转义再换行：<br> 由我们插入，不会被子串注入
+  var safe = escHtml(msg).replace(/\n/g, '<br>');
+  t.innerHTML = '<span class="toast-msg">' + safe + '</span>' +
+                '<button class="toast-close" aria-label="关闭">×</button>';
+  t.querySelector('.toast-close').onclick = function() { dismiss(); };
+  c.appendChild(t);
+  function dismiss() { t.classList.add('toast-out'); setTimeout(function() { t.remove(); }, 200); }
+  setTimeout(dismiss, ms);
+}
+
+// ---------- 按钮 busy 态 ----------
+function btnBusy(btn, busyText) {
+  if (!btn) return function() {};
+  var orig = btn.textContent;
+  var origDisabled = btn.disabled;
+  btn.disabled = true;
+  if (busyText) btn.textContent = busyText;
+  return function() { btn.disabled = origDisabled; btn.textContent = orig; };
+}
 
 // 左侧菜单切换
 function showPage(name) {
   var pages = document.querySelectorAll('.page');
   for (var i = 0; i < pages.length; i++) pages[i].classList.remove('active');
   var target = document.getElementById('page-' + name);
-  if (target) target.classList.add('active');
+  if (target) { target.classList.add('active'); }
   var items = document.querySelectorAll('.nav-item');
   for (var j = 0; j < items.length; j++) {
-    if (items[j].getAttribute('data-page') === name) items[j].classList.add('active');
-    else items[j].classList.remove('active');
+    var isActive = items[j].getAttribute('data-page') === name;
+    items[j].classList.toggle('active', isActive);
+    if (isActive) items[j].setAttribute('aria-current', 'page');
+    else items[j].removeAttribute('aria-current');
   }
+  // 重置滚动位置：切页后不应停留在上一页的滚动位置
+  var main = document.querySelector('.main');
+  if (main) main.scrollTop = 0;
   if (name === 'settings') loadSettings();
   if (name === 'apikeys') loadApiKeys();
   if (name === 'imagegen') loadImageAccounts();
@@ -71,6 +105,7 @@ function buildGauge(id, pct, usedStr, totalStr, remainStr, color, title, detail,
       '<span class="nr-countdown">（' + countdownStr + '）</span>' +
     '</div>';
   }
+  // 圆环内只放百分比，已用/剩余移到下方 gauge-detail，避免文字超出环内径
   return '<div class="gauge-wrap">' +
     '<div class="gauge-title">' + title + '</div>' +
     '<div class="gauge">' +
@@ -80,18 +115,17 @@ function buildGauge(id, pct, usedStr, totalStr, remainStr, color, title, detail,
       '</svg>' +
       '<div class="center">' +
         '<div class="pct">' + pct.toFixed(1) + '<span class="unit">%</span></div>' +
-        '<div class="label">已用 ' + usedStr + ' / ' + totalStr + '</div>' +
-        '<div class="label">剩余 ' + remainStr + '</div>' +
+        '<div class="gauge-remain">剩余 ' + remainStr + '</div>' +
       '</div>' +
     '</div>' +
-    '<div class="gauge-detail">' + detail + '</div>' +
+    '<div class="gauge-detail">' + detail + ' · 已用 ' + usedStr + ' / ' + totalStr + '</div>' +
     refreshHtml +
   '</div>';
 }
 
 function colorForPct(pct) {
   if (pct < 60) return '#52c41a';
-  if (pct < 85) return '#faad14';
+  if (pct < 85) return '#ad6800';
   return '#f5222d';
 }
 
@@ -106,7 +140,7 @@ function addAccountRow(username, hasPassword) {
   div.innerHTML = '<div class="col-user"><input type="text" placeholder="用户名" value="' + escHtml(username) + '"></div>' +
     '<div class="col-pass"><input type="password" placeholder="' + (hasPassword ? '留空沿用已保存密码' : '密码') + '" value=""></div>' +
     '<div class="col-actions"><button class="btn btn-sm btn-primary" data-action="loginAccount">登录</button>' +
-    '<button class="btn btn-sm" data-action="clearPass" title="保存时清除已保存的密码" style="color:#faad14;display:none">清密码</button>' +
+    '<button class="btn btn-sm" data-action="clearPass" title="保存时清除已保存的密码" style="color:#ad6800;display:none">清密码</button>' +
     '<button class="btn btn-sm" data-action="removeRow" style="color:#f5222d">删</button></div>';
   container.appendChild(div);
   updateClearBtn(div);
@@ -160,7 +194,8 @@ async function loginAccount(btn) {
   var row = btn.closest('.config-row');
   var username = row.querySelector('.col-user input').value.trim();
   var password = row.querySelector('.col-pass input').value;
-  if (!username || !password) { alert('请先填写用户名和密码'); return; }
+  if (!username || !password) { showToast('请先填写用户名和密码', 'warning'); return; }
+  // 不用 btnBusy：登录成功后要保留「已登录」状态，不能被无条件恢复
   btn.disabled = true; btn.textContent = '登录中...';
   try {
     var resp = await apiFetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username:username, password:password})});
@@ -173,10 +208,15 @@ async function loginAccount(btn) {
       row.dataset.clearPass = '';
       updateClearBtn(row);
       btn.textContent = '已登录'; btn.style.color = '#52c41a';
+      showToast('登录成功', 'success');
       await fetchUsage();
-    } else { btn.textContent = '失败'; btn.style.color = '#f5222d'; alert('登录失败: ' + (data.error || '未知')); }
+    } else { btn.textContent = '失败'; btn.style.color = '#f5222d'; showToast('登录失败: ' + (data.error || '未知'), 'error'); }
   } catch(e) { btn.textContent = '失败'; btn.style.color = '#f5222d'; }
-  finally { setTimeout(function() { btn.disabled = false; if (btn.textContent === '登录中...') { btn.textContent = '登录'; btn.style.color = ''; } }, 3000); }
+  finally { setTimeout(function() {
+    btn.disabled = false;
+    // 成功保留「已登录」，其他状态 3 秒后恢复
+    if (btn.textContent !== '已登录') { btn.textContent = '登录'; btn.style.color = ''; }
+  }, 3000); }
 }
 
 async function saveConfig() {
@@ -188,7 +228,7 @@ async function saveConfig() {
     if (seen[a.username] && dupes.indexOf(a.username) < 0) dupes.push(a.username);
     seen[a.username] = 1;
   });
-  if (dupes.length) { alert('账号名重复，重复项会被丢弃：\n' + dupes.join('\n')); return; }
+  if (dupes.length) { showToast('账号名重复，重复项会被丢弃：\n' + dupes.join('、'), 'warning'); return; }
   // 改用户名 = 删旧建新：旧用户名下的已存密码不会随改名迁移，需二次确认避免静默丢失
   var renamed = [];
   document.querySelectorAll('#accountRows .config-row').forEach(function(row) {
@@ -198,6 +238,8 @@ async function saveConfig() {
     if (user && user !== orig && row.dataset.hasPassword === '1' && !pass) renamed.push(orig);
   });
   if (renamed.length && !confirm('「' + renamed.join('、') + '」的账号名被改动，已保存的密码不会迁移到新用户名的账号，需重新登录。确定继续？')) return;
+  var saveBtn = document.getElementById('saveConfigBtn');
+  var done = btnBusy(saveBtn, '保存中...');
   try {
     var resp = await apiFetch('/api/accounts', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({accounts: accounts})});
     if (!resp.ok) {
@@ -206,17 +248,23 @@ async function saveConfig() {
     }
     var data = await resp.json();
     if (data.success) { var s = document.getElementById('saveStatus'); s.classList.add('show'); setTimeout(function() { s.classList.remove('show'); }, 2000); await loadConfigRows(); fetchUsage(); }
-    else { alert('保存失败: ' + (data.error || '')); }
-  } catch(e) { alert('保存失败: ' + e.message); }
+    else { showToast('保存失败: ' + (data.error || ''), 'error'); }
+  } catch(e) { showToast('保存失败: ' + e.message, 'error'); }
+  finally { done(); }
 }
 
 async function loadConfigRows() {
-  var resp = await apiFetch('/api/accounts');
-  var data = await resp.json();
   var container = document.getElementById('accountRows');
-  container.innerHTML = '';
-  if (data.accounts && data.accounts.length > 0) data.accounts.forEach(function(a) { addAccountRow(a.username||'', a.has_password); });
-  else addAccountRow();
+  try {
+    var resp = await apiFetch('/api/accounts');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    var data = await resp.json();
+    container.innerHTML = '';
+    if (data.accounts && data.accounts.length > 0) data.accounts.forEach(function(a) { addAccountRow(a.username||'', a.has_password); });
+    else addAccountRow();
+  } catch(e) {
+    container.innerHTML = '<div class="tip tip-error">加载账号失败: ' + escHtml(e.message) + '</div>';
+  }
 }
 
 async function fetchUsage() {
@@ -240,8 +288,9 @@ async function fetchUsage() {
     document.getElementById('loading').style.display = 'none';
     // 失败后不必等满整个刷新间隔才重试，但也不要每秒重试
     countdown = Math.min(countdown, 30);
+    renderCountdown();
     document.getElementById('overviewBody').innerHTML =
-      '<div class="tip" style="background:#fff1f0;border-color:#ffccc7;color:#f5222d">查询失败: ' + escHtml(e.message) + '</div>';
+      '<div class="tip tip-error">查询失败: ' + escHtml(e.message) + '</div>';
     document.getElementById('detailBody').innerHTML = '';
   } finally { fetchBusy = false; btn.disabled = false; btn.textContent = '刷新'; }
 }
@@ -282,9 +331,11 @@ function grantCell(item) {
 // 5 小时窗口长度，用于换算「距下次刷新」的进度条比例
 var RESET_WINDOW_SEC = 5 * 3600;
 
-// 账号列：账号名 + （若有）当前套餐名。套餐名换行显示，避免把表格撑宽
+// 账号列：账号名 + （若有）当前套餐名 + 可用性状态徽标
 function nameCell(r) {
   var s = escHtml(r.name || '未知');
+  var meta = r.status ? _STATUS_META[r.status] : null;
+  if (meta) s += '<span class="badge ' + meta.cls + '" style="margin-left:6px">' + meta.text + '</span>';
   if (r.plan) s += '<span class="plan-name">' + escHtml(r.plan) + '</span>';
   return '<td>' + s + '</td>';
 }
@@ -326,27 +377,62 @@ function animateRings(rings) {
   }, 100);
 }
 
+// 账号可用性：基于积分池额度判断 可用 / 降级 / 不可用
+// 可用  ：通用积分池 5h/7d 任一未满，或虽已满但活动固定积分 > 0 可兜底
+// 降级  ：通用积分池耗尽，但 Flash-Lite 专属池 5h/7d 均未满（仍有额度）
+// 不可用：通用池与专属池均耗尽（或无积分池数据）
+function accountStatus(def, ded) {
+  if (def) {
+    var g5 = parseFloat(def.usage_pct_5h) || 0;
+    var g7 = parseFloat(def.usage_pct_7d) || 0;
+    if (g5 < 100 && g7 < 100) return 'available';
+    if (toNum(def.grant_balance) > 0) return 'available';
+  }
+  if (ded) {
+    var d5 = parseFloat(ded.usage_pct_5h) || 0;
+    var d7 = parseFloat(ded.usage_pct_7d) || 0;
+    if (d5 >= 100 || d7 >= 100) return 'unavailable';
+    return 'degraded';
+  }
+  return 'unavailable';
+}
+
+var _STATUS_META = {
+  available:   {cls: 'badge-ok',   text: '可用'},
+  degraded:    {cls: 'badge-warn', text: '降级'},
+  unavailable: {cls: 'badge-err',  text: '不可用'}
+};
+
 // ---------- 账号总览 ----------
 function renderOverview(data) {
   document.getElementById('loading').style.display = 'none';
   var accounts = data.accounts || [];
-  if (data.warning) { alert('配置提示：' + data.warning); }
+  // 配置告警：只在内容变化时弹一次 toast，避免每次自动刷新都打断
+  if (data.warning && data.warning !== _lastWarning) {
+    _lastWarning = data.warning;
+    showToast('配置提示：' + data.warning, 'warning', 8000);
+  } else if (!data.warning) {
+    _lastWarning = null;
+  }
 
   var total5h = 0, used5h = 0, remain5h = 0;
   var total7d = 0, used7d = 0, remain7d = 0;
   var dTotal5h = 0, dUsed5h = 0, dRemain5h = 0;
   var dTotal7d = 0, dUsed7d = 0, dRemain7d = 0;
-  var okCount = 0, errCount = 0, defCount = 0, dedCount = 0;
+  var availCount = 0, degradCount = 0, unavailCount = 0, defCount = 0, dedCount = 0;
   var earliest5hReset = 0, earliest7dReset = 0;
   var earliest5hResetD = 0, earliest7dResetD = 0;
   var rows = [];
 
   accounts.forEach(function(a) {
-    if (a.error) { errCount++; rows.push({name: a.username, err: a.error}); return; }
-    okCount++;
+    if (a.error) { unavailCount++; rows.push({name: a.username, err: a.error}); return; }
     var items = a.items || [];
     var def = findPool(items, 'default', '通用');
     var ded = findPool(items, 'dedicated', 'Flash-Lite');
+    var st = accountStatus(def, ded);
+    if (st === 'available') availCount++;
+    else if (st === 'degraded') degradCount++;
+    else unavailCount++;
 
     // 圆环合计：通用积分池与 Flash-Lite 专属积分池分别累加
     if (def) {
@@ -367,7 +453,7 @@ function renderOverview(data) {
       var dt7 = ded.reset_at_7d_ts || 0;
       if (dt7 > 0 && (earliest7dResetD === 0 || dt7 < earliest7dResetD)) earliest7dResetD = dt7;
     }
-    rows.push({name: a.username, def: def, ded: ded, plan: a.plan});
+    rows.push({name: a.username, def: def, ded: ded, plan: a.plan, status: st});
   });
 
   var pct5h = total5h > 0 ? used5h / total5h * 100 : 0;
@@ -378,8 +464,9 @@ function renderOverview(data) {
   var h = '';
   h += '<div class="summary">';
   h += card('账号总数', String(accounts.length));
-  h += card('正常', String(okCount), '#52c41a');
-  h += card('异常', String(errCount), errCount > 0 ? '#f5222d' : '');
+  h += card('可用', String(availCount), availCount > 0 ? '#52c41a' : '');
+  h += card('降级', String(degradCount), degradCount > 0 ? '#ad6800' : '');
+  h += card('不可用', String(unavailCount), unavailCount > 0 ? '#f5222d' : '');
   h += card('更新时间', (data.timestamp || '').slice(11) || '-');
   h += '</div>';
 
@@ -439,7 +526,7 @@ function renderDetail(data) {
   if (!accounts.length) h += '<div class="tip">还没有配置任何账号，请到「账号配置」页添加</div>';
 
   // 使用率配色（文字色，区别于进度条的背景色）
-  function pctColor(v) { return v < 60 ? '#52c41a' : (v < 85 ? '#d48806' : '#f5222d'); }
+  function pctColor(v) { return v < 60 ? '#52c41a' : (v < 85 ? '#ad6800' : '#f5222d'); }
   function barCls(v) { return v < 60 ? 'green' : (v < 85 ? 'yellow' : 'red'); }
 
   h += '<div class="detail-grid">';
@@ -669,7 +756,9 @@ function setIgMode(mode) {
   _igMode = mode;
   var tabs = document.querySelectorAll('.ig-tab');
   for (var i = 0; i < tabs.length; i++) {
-    tabs[i].classList.toggle('active', tabs[i].getAttribute('data-mode') === mode);
+    var isActive = tabs[i].getAttribute('data-mode') === mode;
+    tabs[i].classList.toggle('active', isActive);
+    tabs[i].setAttribute('aria-selected', isActive ? 'true' : 'false');
   }
   document.getElementById('igUploadRow').style.display = (mode === 'i2i') ? '' : 'none';
   var sizeSel = document.getElementById('igSize');
@@ -732,11 +821,11 @@ async function addIgFiles(fileList) {
   if (!arr.length) return;
   // 仅接受图片
   arr = arr.filter(function(f) { return f.type && f.type.indexOf('image/') === 0; });
-  if (!arr.length) { alert('请选择图片文件'); return; }
+  if (!arr.length) { showToast('请选择图片文件', 'warning'); return; }
   var tooBig = arr.filter(function(f) { return f.size > MAX_REF_IMAGE_BYTES; });
   if (tooBig.length) {
-    alert('以下文件超过 ' + Math.round(MAX_REF_IMAGE_BYTES / 1024 / 1024) +
-          'MB，已跳过：\n' + tooBig.map(function(f) { return f.name; }).join('\n'));
+    showToast('以下文件超过 ' + Math.round(MAX_REF_IMAGE_BYTES / 1024 / 1024) +
+              'MB，已跳过：' + tooBig.map(function(f) { return f.name; }).join('、'), 'warning');
     return;
   }
   var before = _igFiles.length;
@@ -748,7 +837,7 @@ async function addIgFiles(fileList) {
   }
   var added = _igFiles.length - before;
   if (added < arr.length) {
-    alert('参考图最多 5 张，本次仅添加了 ' + added + ' 张');
+    showToast('参考图最多 5 张，本次仅添加了 ' + added + ' 张', 'warning');
   }
   renderIgThumbs();
 }
@@ -778,14 +867,14 @@ async function generateImage() {
   var model = document.getElementById('igModel').value;
   var promptExtend = document.getElementById('igPromptExtend').checked;
   var watermark = document.getElementById('igWatermark').checked;
-  if (!username) { alert('请先在「账号配置」页配置账号，并确保该账号有 API Key'); return; }
-  if (!prompt) { alert('请输入' + (_igMode === 'i2i' ? '编辑指令' : '提示词')); return; }
+  if (!username) { showToast('请先在「账号配置」页配置账号，并确保该账号有 API Key', 'warning'); return; }
+  if (!prompt) { showToast('请输入' + (_igMode === 'i2i' ? '编辑指令' : '提示词'), 'warning'); return; }
 
   var endpoint = '/api/imagegen';
   var body = {username: username, prompt: prompt, size: size, model: model,
               prompt_extend: promptExtend, watermark: watermark};
   if (_igMode === 'i2i') {
-    if (!_igFiles.length) { alert('请至少上传一张参考图'); return; }
+    if (!_igFiles.length) { showToast('请至少上传一张参考图', 'warning'); return; }
     endpoint = '/api/imageedit';
     body.images = _igFiles.map(function(f) { return f.dataUrl; });
   }
@@ -822,7 +911,7 @@ async function generateImage() {
       result.innerHTML = '<div class="ig-empty">已取消</div>';
     } else {
       status.textContent = '';
-      result.innerHTML = '<div class="tip" style="background:#fff1f0;border-color:#ffccc7;color:#f5222d">生成失败：' + escHtml(e.message) + '</div>';
+      result.innerHTML = '<div class="tip tip-error">生成失败：' + escHtml(e.message) + '</div>';
     }
   } finally {
     _igAbort = null;
@@ -881,7 +970,7 @@ document.getElementById('igHistory').addEventListener('click', function(ev) {
 });
 
 async function downloadImage() {
-  if (!_igImage || !_igImage.dlId) { alert('图片不可用，请重新生成'); return; }
+  if (!_igImage || !_igImage.dlId) { showToast('图片不可用，请重新生成', 'warning'); return; }
   var dlId = _igImage.dlId;
   var fmt = _igImage.fmt || 'png';
   // 优先走 pywebview JS-Python 桥接：原生保存对话框，最可靠
@@ -890,9 +979,9 @@ async function downloadImage() {
       var r = await window.pywebview.api.save_image(dlId);
       if (r && r.ok) { flashDownloadBtn('已保存'); return; }
       if (r && r.cancelled) { return; }  // 用户取消，不打扰
-      alert('保存失败：' + ((r && r.error) || '未知错误'));
+      showToast('保存失败：' + ((r && r.error) || '未知错误'), 'error');
     } catch (e) {
-      alert('保存失败：' + (e && e.message ? e.message : '桥接调用异常'));
+      showToast('保存失败：' + (e && e.message ? e.message : '桥接调用异常'), 'error');
     }
     return;
   }
@@ -900,7 +989,7 @@ async function downloadImage() {
   // 不用锚点跳转 /api/imagedl?t=<令牌>，避免会话令牌出现在 URL（浏览器历史 / Referer）。
   try {
     var resp = await apiFetch('/api/imagedl?id=' + encodeURIComponent(dlId));
-    if (!resp.ok) { alert('图片已过期或不存在，请重新生成'); return; }
+    if (!resp.ok) { showToast('图片已过期或不存在，请重新生成', 'warning'); return; }
     var url = URL.createObjectURL(await resp.blob());
     var a = document.createElement('a');
     a.href = url;
@@ -911,7 +1000,7 @@ async function downloadImage() {
     setTimeout(function() { URL.revokeObjectURL(url); }, 10000);
     flashDownloadBtn('已保存');
   } catch (e) {
-    alert('保存失败：' + (e && e.message ? e.message : '下载异常'));
+    showToast('保存失败：' + (e && e.message ? e.message : '下载异常'), 'error');
   }
 }
 
@@ -957,7 +1046,7 @@ async function loadSettings() {
     }
 
     var h = '';
-    h += '<div class="settings-card"><div class="settings-title">常规</div>';
+    h += '<div class="settings-card"><h3 class="settings-title">常规</h3>';
     h += '<div class="settings-row"><span class="k">自动刷新</span><select id="setRefresh">' + opts + '</select>' +
          '<button class="btn btn-sm btn-primary" data-action="saveSettings">保存</button>' +
          '<span class="save-status" id="settingsStatus">已保存</span></div>';
@@ -966,7 +1055,7 @@ async function loadSettings() {
     h += '<div class="settings-row"><span class="k">本地服务</span><span class="v">127.0.0.1:' + escHtml(d.port) + '</span></div>';
     h += '</div>';
 
-    h += '<div class="settings-card"><div class="settings-title">安全状态</div><ul class="sec-list">' +
+    h += '<div class="settings-card"><h3 class="settings-title">安全状态</h3><ul class="sec-list">' +
          '<li><span class="ok">✔</span>凭据加密存储（AES + 系统密钥保护，非明文落盘）</li>' +
          '<li><span class="ok">✔</span>界面不回传密码与 JWT 明文</li>' +
          '<li><span class="ok">✔</span>本地服务端口每次启动随机分配</li>' +
@@ -978,23 +1067,25 @@ async function loadSettings() {
     if (d.update) {
       _updateUrl = d.update.url || '';
       updateRow = '<div class="settings-row"><span class="k">更新</span>' +
-        '<span class="v" style="color:#faad14">发现新版本 v' + escHtml(d.update.latest || '') +
+        '<span class="v" style="color:#ad6800">发现新版本 v' + escHtml(d.update.latest || '') +
         '</span> <button class="btn btn-sm btn-primary" data-action="openUpdate">去下载</button></div>';
     }
-    h += '<div class="settings-card"><div class="settings-title">关于</div>' +
+    h += '<div class="settings-card"><h3 class="settings-title">关于</h3>' +
          '<div class="settings-row"><span class="k">版本</span><span class="v">' + escHtml(d.version) + '</span></div>' +
          updateRow +
          '<div class="settings-row"><span class="k">说明</span><span class="v">仅在本机运行，凭据不上传；JWT 过期后会用保存的账号密码自动重登。</span></div></div>';
 
     box.innerHTML = h;
   } catch(e) {
-    box.innerHTML = '<div class="tip" style="background:#fff1f0;border-color:#ffccc7;color:#f5222d">加载失败: ' + escHtml(e.message) + '</div>';
+    box.innerHTML = '<div class="tip tip-error">加载失败: ' + escHtml(e.message) + '</div>';
   }
 }
 
 async function saveSettings() {
   var sel = document.getElementById('setRefresh');
   var val = parseInt(sel.value, 10) || 300;
+  var saveBtn = sel.parentElement.querySelector('[data-action="saveSettings"]');
+  var done = btnBusy(saveBtn, '保存中...');
   try {
     var resp = await apiFetch('/api/settings', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1007,8 +1098,10 @@ async function saveSettings() {
       renderCountdown();
       var s = document.getElementById('settingsStatus');
       if (s) { s.classList.add('show'); setTimeout(function() { s.classList.remove('show'); }, 2000); }
-    } else { alert('保存失败: ' + (d.error || '')); }
-  } catch(e) { alert('保存失败: ' + e.message); }
+      showToast('设置已保存', 'success');
+    } else { showToast('保存失败: ' + (d.error || ''), 'error'); }
+  } catch(e) { showToast('保存失败: ' + e.message, 'error'); }
+  finally { done(); }
 }
 
 function card(label, value, color) { return '<div class="summary-card"><div class="label">'+escHtml(label)+'</div><div class="value" style="'+(color?'color:'+color:'')+'">'+escHtml(value)+'</div></div>'; }
@@ -1092,6 +1185,43 @@ document.addEventListener('click', function(ev) {
     case 'openUpdate': if (_updateUrl) openUpdateUrl(_updateUrl); break;
   }
 });
+
+// ---------- 窗口控制（无边框窗口） ----------
+function initWindowControls() {
+  var minBtn = document.getElementById('winMinBtn');
+  var maxBtn = document.getElementById('winMaxBtn');
+  var closeBtn = document.getElementById('winCloseBtn');
+  var dragRegion = document.querySelector('.titlebar-drag');
+
+  function callApi(method) {
+    if (window.pywebview && window.pywebview.api && typeof window.pywebview.api[method] === 'function') {
+      return window.pywebview.api[method]();
+    }
+    return Promise.resolve();
+  }
+
+  if (minBtn) minBtn.addEventListener('click', function() { callApi('minimize_window'); });
+  if (closeBtn) closeBtn.addEventListener('click', function() { callApi('close_window'); });
+
+  if (maxBtn) {
+    maxBtn.addEventListener('click', function() {
+      callApi('toggle_maximize_window').then(function(isMax) {
+        if (isMax === undefined) return;
+        maxBtn.innerHTML = isMax ? '&#x2750;' : '&#x25A1;';  // ❐ restore / □ maximize
+        maxBtn.setAttribute('title', isMax ? '还原' : '最大化');
+      });
+    });
+  }
+
+  // 双击标题栏切换最大化（桌面应用标准交互）
+  if (dragRegion && maxBtn) {
+    dragRegion.addEventListener('dblclick', function() {
+      maxBtn.click();
+    });
+  }
+}
+
+initWindowControls();
 
 loadSettings().then(function() { return loadConfigRows(); }).then(function() { fetchUsage(); });
 setInterval(tick, 1000);
