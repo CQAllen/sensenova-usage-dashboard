@@ -28,6 +28,7 @@ import logging
 import os
 import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -497,7 +498,7 @@ def _parse_version(s: str) -> tuple[int, ...]:
 
 
 def _check_update() -> None:
-    """后台查 GitHub 最新 release；比 APP_VERSION 新则缓存 {latest, url}。
+    """后台查 GitHub 最新 release；比 APP_VERSION 新则缓存 {latest, url, download_url, size}。
     网络/解析失败一律静默——更新检查是锦上添花，不能影响启动。"""
     global _update_info
     try:
@@ -507,7 +508,16 @@ def _check_update() -> None:
             data = json.loads(r.read().decode("utf-8"))
         latest = (data.get("tag_name") or "").lstrip("vV")
         if latest and _parse_version(latest) > _parse_version(APP_VERSION):
-            _update_info = {"latest": latest, "url": data.get("html_url") or url}
+            info = {"latest": latest, "url": data.get("html_url") or url}
+            # 找 .exe asset 的下载地址（自动更新用）
+            for a in data.get("assets") or []:
+                name = a.get("name", "")
+                if name.endswith(".exe") and a.get("browser_download_url"):
+                    info["download_url"] = a["browser_download_url"]
+                    info["size"] = a.get("size")
+                    info["asset_name"] = name
+                    break
+            _update_info = info
     except Exception:
         pass
 
@@ -557,6 +567,87 @@ class AppApi(imagegen.ImageApi):
     def close_window(self):
         if webview.windows:
             webview.windows[0].destroy()
+
+    def download_and_update(self):
+        """从 GitHub Release 下载新版 exe → 生成批处理交换 → 启动 → 退出当前进程。
+
+        流程：下载到 %TEMP% → 生成 bat（等 PID 退出 → move → start → 自删）
+        → Popen detached 启动 bat → destroy 当前窗口。源码模式不支持。
+        """
+        if not getattr(sys, "frozen", False):
+            return {"ok": False, "error": "源码运行模式不支持自动更新，请手动下载或 git pull"}
+        if not _update_info or not _update_info.get("download_url"):
+            return {"ok": False, "error": "无可用的下载地址"}
+
+        download_url = _update_info["download_url"]
+        current_exe = sys.executable
+        temp_dir = os.environ.get("TEMP") or os.path.expanduser("~")
+        new_exe_path = os.path.join(temp_dir, "sensenova_update.exe")
+        bat_path = os.path.join(temp_dir, "sensenova_updater.bat")
+
+        # ---- 下载 ----
+        try:
+            resp = requests.get(download_url, stream=True, timeout=120)
+            resp.raise_for_status()
+            with open(new_exe_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=64 * 1024):
+                    if chunk:
+                        f.write(chunk)
+        except Exception as e:
+            return {"ok": False, "error": f"下载失败: {accounts.sanitize_error(e, 120)}"}
+
+        # ---- 校验大小 ----
+        expected = _update_info.get("size")
+        if expected and isinstance(expected, int) and expected > 0:
+            actual = os.path.getsize(new_exe_path)
+            if actual != expected:
+                return {"ok": False, "error": f"下载大小不匹配（期望 {expected}，实际 {actual}）"}
+
+        # ---- 生成批处理：等进程退出 → move → 重启 → 自删 ----
+        pid = os.getpid()
+        bat = (
+            "@echo off\r\n"
+            "chcp 65001 >nul 2>nul\r\n"
+            f'set "PID={pid}"\r\n'
+            f'set "NEW_EXE={new_exe_path}"\r\n'
+            f'set "OLD_EXE={current_exe}"\r\n'
+            "\r\n"
+            ":loop\r\n"
+            'tasklist /fi "PID eq %PID%" 2>nul | find "%PID%" >nul\r\n'
+            "if errorlevel 1 goto replace\r\n"
+            "timeout /t 1 /nobreak >nul\r\n"
+            "goto loop\r\n"
+            "\r\n"
+            ":replace\r\n"
+            "timeout /t 2 /nobreak >nul\r\n"
+            'move /Y "%NEW_EXE%" "%OLD_EXE%" 2>nul\r\n'
+            "if errorlevel 1 (\r\n"
+            "  timeout /t 3 /nobreak >nul\r\n"
+            '  move /Y "%NEW_EXE%" "%OLD_EXE%" 2>nul\r\n'
+            ")\r\n"
+            'start "" "%OLD_EXE%"\r\n'
+            'del "%~f0"\r\n'
+        )
+        try:
+            with open(bat_path, "w", encoding="utf-8") as f:
+                f.write(bat)
+        except Exception as e:
+            return {"ok": False, "error": f"生成更新脚本失败: {accounts.sanitize_error(e, 120)}"}
+
+        # ---- 启动批处理（detached，不随父进程退出） ----
+        try:
+            subprocess.Popen(
+                ["cmd", "/c", bat_path],
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                close_fds=True,
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"启动更新脚本失败: {accounts.sanitize_error(e, 120)}"}
+
+        # ---- 退出当前进程，批处理接管 ----
+        if webview.windows:
+            webview.windows[0].destroy()
+        return {"ok": True}
 
 
 def main() -> None:

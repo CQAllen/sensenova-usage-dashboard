@@ -145,7 +145,27 @@ td.refresh-cell { white-space: nowrap; }
 .config-warning .cw-msg { flex: 1; line-height: 1.5; }
 .config-warning .cw-close { background: none; border: none; cursor: pointer; color: var(--text-tertiary); font-size: 16px; line-height: 1; padding: 0; flex: none; }
 
-/* ---------- 账号配置 ---------- */
+/* ---------- 账号管理（整合配置 + API Key） ---------- */
+.acct-card { background: var(--bg-card); border-radius: var(--radius-lg); box-shadow: var(--shadow-card); overflow: hidden; transition: box-shadow 0.2s; }
+.acct-card:hover { box-shadow: var(--shadow-hover); }
+#accountRows .acct-card { margin-bottom: 12px; }
+.acct-card-head { display: flex; align-items: center; gap: 8px; padding: 10px 16px; cursor: pointer; user-select: none; transition: background 0.15s; }
+.acct-card-head:hover { background: var(--bg-hover); }
+.acct-card-name { flex: 1; min-width: 80px; padding: 4px 8px; border: 1px solid var(--border-control); border-radius: var(--radius-sm); font-size: var(--font-sm); font-weight: 600; font-family: inherit; }
+.acct-card-name:focus, .acct-card-name:focus-visible { outline: none; border-color: var(--primary); box-shadow: var(--shadow-focus); }
+.acct-card-toggle { color: var(--text-tertiary); font-size: 16px; flex: none; transition: transform 0.2s; }
+.acct-card.expanded .acct-card-toggle { transform: rotate(90deg); }
+.acct-card-body { display: none; padding: 12px 16px; border-top: 1px solid var(--border-light); }
+.acct-card.expanded .acct-card-body { display: block; }
+.acct-card-pwd-row { display: flex; gap: 6px; align-items: center; margin-bottom: 12px; }
+.acct-card-pwd-row input { flex: 1; min-width: 100px; padding: 5px 8px; border: 1px solid var(--border-control); border-radius: var(--radius-sm); font-size: var(--font-sm); }
+.acct-card-pwd-row input:focus, .acct-card-pwd-row input:focus-visible { outline: none; border-color: var(--primary); box-shadow: var(--shadow-focus); }
+.acct-card-pwd-row .pwd-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.acct-card-keys-title { font-size: var(--font-sm); color: var(--text-tertiary); margin: 12px 0 6px; }
+.acct-card-keys table { width: 100%; border-collapse: collapse; }
+.acct-card-del { margin-top: 14px; color: var(--danger); }
+
+/* ---------- 账号配置（旧样式保留兼容） ---------- */
 .config-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--border-light); }
 .config-row:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
 .config-row .col-actions { display: flex; gap: 4px; flex-shrink: 0; }

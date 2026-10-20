@@ -52,7 +52,7 @@ function showPage(name) {
   var main = document.querySelector('.main');
   if (main) main.scrollTop = 0;
   if (name === 'settings') loadSettings();
-  if (name === 'apikeys') loadApiKeys();
+  if (name === 'config') loadAccountManagement();
   if (name === 'imagegen') loadImageAccounts();
 }
 
@@ -129,60 +129,121 @@ function colorForPct(pct) {
   return '#f5222d';
 }
 
-function addAccountRow(username, hasPassword) {
-  username = username || '';
-  var container = document.getElementById('accountRows');
-  var div = document.createElement('div');
-  div.className = 'config-row';
-  div.dataset.hasPassword = hasPassword ? '1' : '';
-  div.dataset.clearPass = '';
-  div.dataset.origUser = username || '';
-  div.innerHTML = '<div class="col-user"><input type="text" placeholder="用户名" value="' + escHtml(username) + '"></div>' +
-    '<div class="col-pass"><input type="password" placeholder="' + (hasPassword ? '留空沿用已保存密码' : '密码') + '" value=""></div>' +
-    '<div class="col-actions"><button class="btn btn-sm btn-primary" data-action="loginAccount">登录</button>' +
-    '<button class="btn btn-sm" data-action="clearPass" title="保存时清除已保存的密码" style="color:#ad6800;display:none">清密码</button>' +
-    '<button class="btn btn-sm" data-action="removeRow" style="color:#f5222d">删</button></div>';
-  container.appendChild(div);
-  updateClearBtn(div);
-}
-
-// 「清密码」按钮可见性：仅当该行有已保存密码、未在输入新密码、且未标记清除时显示
-function updateClearBtn(row) {
-  var cp = row.querySelector('[data-action="clearPass"]');
-  if (!cp) return;
-  var hasPwd = row.dataset.hasPassword === '1';
-  var typing = !!row.querySelector('.col-pass input').value;
-  var marked = row.dataset.clearPass === '1';
-  cp.style.display = (hasPwd && !typing && !marked) ? '' : 'none';
-}
-
-// 标记本行在保存时清除已保存的密码（不立即生效，需点「保存配置」）
-function clearPass(btn) {
-  var row = btn.closest('.config-row');
-  var passInput = row.querySelector('.col-pass input');
-  passInput.value = '';
-  passInput.placeholder = '保存后清除已保存密码';
-  row.dataset.clearPass = '1';
-  updateClearBtn(row);
-}
-
-function removeRow(btn) { btn.closest('.config-row').remove(); }
+// ---------- 账号管理（整合配置 + API Key） ----------
 
 function escHtml(s) { if (s === undefined || s === null) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+// 状态徽标判定：综合 has_password / has_token / key 查询错误
+function _acctStatusBadge(hasPwd, hasToken, keyError) {
+  if (keyError) {
+    if (keyError.indexOf('过期') >= 0 || keyError.indexOf('未配置') >= 0)
+      return {cls: 'badge-warn', text: 'JWT 过期'};
+    return {cls: 'badge-err', text: '登录失败'};
+  }
+  if (hasPwd && hasToken) return {cls: 'badge-ok', text: '已登录'};
+  if (hasPwd && !hasToken) return {cls: 'badge-warn', text: '需登录'};
+  return {cls: '', text: '未配置'};
+}
+
+// 渲染密钥表（复用于卡片展开体）
+function _renderKeysTable(keys, username) {
+  if (!keys || !keys.length) return '<div class="empty-row">该账号暂无 API Key</div>';
+  var h = '<table><tr><th>名称</th><th class="col-key">API Key</th><th>创建时间</th><th>状态</th></tr>';
+  keys.forEach(function(k) {
+    var uid = escHtml(k.id || '');
+    var user = escHtml(username || '');
+    h += '<tr><td>' + escHtml(k.name || '-') +
+         (k.is_default ? ' <span class="badge badge-plan">默认</span>' : '') + '</td>' +
+         '<td class="col-key"><code class="key-mono" data-mid="' + uid + '">' + escHtml(k.masked || '-') + '</code>' +
+           '<button class="key-icon" data-act="toggle" data-id="' + uid + '" data-user="' + user + '" title="显示/隐藏">' + SVG_EYE + '</button>' +
+           '<button class="key-icon" data-act="copy" data-id="' + uid + '" data-user="' + user + '" title="复制">' + SVG_COPY + '</button></td>' +
+         '<td>' + escHtml(k.create_time || '-') + '</td>' +
+         '<td>' + (k.status === 'enabled' ? '启用' : escHtml(k.status || '-')) + '</td></tr>';
+  });
+  h += '</table>';
+  return h;
+}
+
+// 创建一张账号卡片
+function renderAccountCard(username, hasPassword, hasToken, keysData) {
+  var card = document.createElement('div');
+  card.className = 'acct-card';
+  card.dataset.hasPassword = hasPassword ? '1' : '';
+  card.dataset.clearPass = '';
+  card.dataset.origUser = username || '';
+
+  var keyError = (keysData && keysData.error) ? keysData.error : '';
+  var keys = (keysData && keysData.keys) ? keysData.keys : [];
+  var st = _acctStatusBadge(hasPassword, hasToken, keyError);
+  var keyBadge = keys.length ? '<span class="badge badge-ok">' + keys.length + ' 个 Key</span>'
+                             : (keyError ? '' : '<span class="badge">无 Key</span>');
+
+  card.innerHTML =
+    '<div class="acct-card-head">' +
+      '<input type="text" class="acct-card-name" placeholder="用户名" value="' + escHtml(username || '') + '">' +
+      (st.cls ? '<span class="badge ' + st.cls + '">' + escHtml(st.text) + '</span>' : '') +
+      keyBadge +
+      '<span class="acct-card-toggle">&#9656;</span>' +
+    '</div>' +
+    '<div class="acct-card-body">' +
+      '<div class="acct-card-pwd-row">' +
+        '<input type="password" placeholder="' + (hasPassword ? '留空沿用已保存密码' : '密码') + '">' +
+        '<div class="pwd-actions">' +
+          '<button class="btn btn-sm btn-primary" data-action="loginAccount">登录</button>' +
+          '<button class="btn btn-sm" data-action="clearPass" title="保存时清除已保存密码" style="color:#ad6800;display:none">清除密码</button>' +
+        '</div>' +
+      '</div>' +
+      (keyError
+        ? '<div class="tip tip-error">' + escHtml(keyError) + '，请重新登录</div>'
+        : '<div class="acct-card-keys"><div class="acct-card-keys-title">API Keys</div>' + _renderKeysTable(keys, username) + '</div>'
+      ) +
+      '<button class="btn btn-sm acct-card-del" data-action="removeRow">删除账号</button>' +
+    '</div>';
+
+  updateClearBtn(card);
+  return card;
+}
+
+// 新增空账号卡片（默认展开）
+function addAccountRow(username, hasPassword) {
+  var container = document.getElementById('accountRows');
+  var card = renderAccountCard(username || '', hasPassword, false, null);
+  card.classList.add('expanded');  // 新增 / 空白卡片默认展开
+  container.appendChild(card);
+}
+
+// 「清密码」按钮可见性
+function updateClearBtn(card) {
+  var cp = card.querySelector('[data-action="clearPass"]');
+  if (!cp) return;
+  var hasPwd = card.dataset.hasPassword === '1';
+  var typing = !!card.querySelector('.acct-card-pwd-row input').value;
+  var marked = card.dataset.clearPass === '1';
+  cp.style.display = (hasPwd && !typing && !marked) ? '' : 'none';
+}
+
+function clearPass(btn) {
+  var card = btn.closest('.acct-card');
+  var passInput = card.querySelector('.acct-card-pwd-row input');
+  passInput.value = '';
+  passInput.placeholder = '保存后清除已保存密码';
+  card.dataset.clearPass = '1';
+  updateClearBtn(card);
+}
+
+function removeRow(btn) { btn.closest('.acct-card').remove(); }
+
 function collectAccounts() {
-  var rows = document.querySelectorAll('#accountRows .config-row');
+  var cards = document.querySelectorAll('#accountRows .acct-card');
   var accounts = [];
-  rows.forEach(function(row) {
-    var username = row.querySelector('.col-user input').value.trim();
+  cards.forEach(function(card) {
+    var username = card.querySelector('.acct-card-name').value.trim();
     if (!username) return;
-    var password = row.querySelector('.col-pass input').value;
+    var password = card.querySelector('.acct-card-pwd-row input').value;
     var item = {username: username};
-    // 密码留空表示沿用已保存的密码（服务端不会覆盖）；不提交 jwt_token
     if (password) {
       item.password = password;
-    } else if (row.dataset.clearPass === '1') {
-      // 已标记清除：保存时让服务端把该账号已存密码置空
+    } else if (card.dataset.clearPass === '1') {
       item.password_clear = true;
     }
     accounts.push(item);
@@ -191,30 +252,30 @@ function collectAccounts() {
 }
 
 async function loginAccount(btn) {
-  var row = btn.closest('.config-row');
-  var username = row.querySelector('.col-user input').value.trim();
-  var password = row.querySelector('.col-pass input').value;
+  var card = btn.closest('.acct-card');
+  var username = card.querySelector('.acct-card-name').value.trim();
+  var password = card.querySelector('.acct-card-pwd-row input').value;
   if (!username || !password) { showToast('请先填写用户名和密码', 'warning'); return; }
-  // 不用 btnBusy：登录成功后要保留「已登录」状态，不能被无条件恢复
   btn.disabled = true; btn.textContent = '登录中...';
   try {
     var resp = await apiFetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({username:username, password:password})});
     var data = await resp.json();
     if (data.success) {
-      var passInput = row.querySelector('.col-pass input');
+      var passInput = card.querySelector('.acct-card-pwd-row input');
       passInput.value = '';
       passInput.placeholder = '留空沿用已保存密码';
-      row.dataset.hasPassword = '1';
-      row.dataset.clearPass = '';
-      updateClearBtn(row);
+      card.dataset.hasPassword = '1';
+      card.dataset.clearPass = '';
+      updateClearBtn(card);
       btn.textContent = '已登录'; btn.style.color = '#52c41a';
+      card.classList.add('expanded');  // 登录成功后展开，立即看到密钥
       showToast('登录成功', 'success');
+      await loadAccountManagement();    // 刷新密钥数据
       await fetchUsage();
     } else { btn.textContent = '失败'; btn.style.color = '#f5222d'; showToast('登录失败: ' + (data.error || '未知'), 'error'); }
   } catch(e) { btn.textContent = '失败'; btn.style.color = '#f5222d'; }
   finally { setTimeout(function() {
     btn.disabled = false;
-    // 成功保留「已登录」，其他状态 3 秒后恢复
     if (btn.textContent !== '已登录') { btn.textContent = '登录'; btn.style.color = ''; }
   }, 3000); }
 }
@@ -222,20 +283,18 @@ async function loginAccount(btn) {
 async function saveConfig() {
   var accounts = collectAccounts();
   if (accounts.length === 0 && !confirm('当前没有任何账号，保存将清空已配置的账号，确定继续？')) return;
-  // 重复用户名：服务端只保留第一条，后一条的密码会被静默丢弃
   var seen = {}, dupes = [];
   accounts.forEach(function(a) {
     if (seen[a.username] && dupes.indexOf(a.username) < 0) dupes.push(a.username);
     seen[a.username] = 1;
   });
   if (dupes.length) { showToast('账号名重复，重复项会被丢弃：\n' + dupes.join('、'), 'warning'); return; }
-  // 改用户名 = 删旧建新：旧用户名下的已存密码不会随改名迁移，需二次确认避免静默丢失
   var renamed = [];
-  document.querySelectorAll('#accountRows .config-row').forEach(function(row) {
-    var user = row.querySelector('.col-user input').value.trim();
-    var pass = row.querySelector('.col-pass input').value;
-    var orig = row.dataset.origUser || '';
-    if (user && user !== orig && row.dataset.hasPassword === '1' && !pass) renamed.push(orig);
+  document.querySelectorAll('#accountRows .acct-card').forEach(function(card) {
+    var user = card.querySelector('.acct-card-name').value.trim();
+    var pass = card.querySelector('.acct-card-pwd-row input').value;
+    var orig = card.dataset.origUser || '';
+    if (user && user !== orig && card.dataset.hasPassword === '1' && !pass) renamed.push(orig);
   });
   if (renamed.length && !confirm('「' + renamed.join('、') + '」的账号名被改动，已保存的密码不会迁移到新用户名的账号，需重新登录。确定继续？')) return;
   var saveBtn = document.getElementById('saveConfigBtn');
@@ -247,25 +306,64 @@ async function saveConfig() {
       throw new Error(ej.error || ('HTTP ' + resp.status));
     }
     var data = await resp.json();
-    if (data.success) { var s = document.getElementById('saveStatus'); s.classList.add('show'); setTimeout(function() { s.classList.remove('show'); }, 2000); await loadConfigRows(); fetchUsage(); }
+    if (data.success) { var s = document.getElementById('saveStatus'); s.classList.add('show'); setTimeout(function() { s.classList.remove('show'); }, 2000); await loadAccountManagement(); fetchUsage(); }
     else { showToast('保存失败: ' + (data.error || ''), 'error'); }
   } catch(e) { showToast('保存失败: ' + e.message, 'error'); }
   finally { done(); }
 }
 
-async function loadConfigRows() {
+// 加载账号管理页：并行取 accounts + keys，渲染卡片
+async function loadAccountManagement(force) {
   var container = document.getElementById('accountRows');
+  var refreshBtn = document.getElementById('configRefreshBtn');
+  var prevExpanded = {};
+  // 保留已展开的卡片状态
+  document.querySelectorAll('#accountRows .acct-card.expanded').forEach(function(c) {
+    var u = c.querySelector('.acct-card-name').value.trim();
+    if (u) prevExpanded[u] = true;
+  });
+  if (refreshBtn) { refreshBtn.disabled = true; refreshBtn.textContent = '查询中...'; }
   try {
-    var resp = await apiFetch('/api/accounts');
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    var data = await resp.json();
+    // 并行拉取：accounts（凭据状态）+ keys（密钥列表 + 查询错误）
+    var p1 = apiFetch('/api/accounts').then(function(r) { return r.json(); });
+    var p2 = fetchKeys(!!force).catch(function(e) { return {accounts: [], _error: e.message}; });
+    var results = await Promise.all([p1, p2]);
+    var acctData = results[0];
+    var keysData = results[1];
+
     container.innerHTML = '';
-    if (data.accounts && data.accounts.length > 0) data.accounts.forEach(function(a) { addAccountRow(a.username||'', a.has_password); });
-    else addAccountRow();
+    var accts = (acctData && acctData.accounts) ? acctData.accounts : [];
+    var keysByUser = {};
+    if (keysData && keysData.accounts) {
+      keysData.accounts.forEach(function(k) { keysByUser[k.username || ''] = k; });
+    }
+
+    if (!accts.length) {
+      addAccountRow();
+    } else {
+      accts.forEach(function(a) {
+        var uname = a.username || '';
+        var kd = keysByUser[uname] || null;
+        var card = renderAccountCard(uname, a.has_password, a.has_token, kd);
+        if (prevExpanded[uname]) card.classList.add('expanded');
+        container.appendChild(card);
+      });
+    }
   } catch(e) {
-    container.innerHTML = '<div class="tip tip-error">加载账号失败: ' + escHtml(e.message) + '</div>';
+    container.innerHTML = '<div class="tip tip-error">加载失败: ' + escHtml(e.message) + '</div>';
+  } finally {
+    if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = '刷新'; }
   }
 }
+
+// 卡片展开/折叠：点击头部切换，但点 input / button 不触发
+document.getElementById('accountRows').addEventListener('click', function(ev) {
+  var head = ev.target.closest ? ev.target.closest('.acct-card-head') : null;
+  if (!head) return;
+  if (ev.target.tagName === 'INPUT' || ev.target.tagName === 'BUTTON' || ev.target.closest('button')) return;
+  var card = head.closest('.acct-card');
+  if (card) card.classList.toggle('expanded');
+});
 
 async function fetchUsage() {
   if (fetchBusy) return;   // 已有在途查询，跳过本次（手动刷新 / 定时刷新 / 登录后刷新共用）
@@ -588,53 +686,6 @@ var SVG_EYE_OFF = '<svg class="ki" viewBox="0 0 24 24" fill="none" stroke="curre
 var SVG_COPY = '<svg class="ki" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 var SVG_OK = '<svg class="ki" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
 var SVG_ERR = '<svg class="ki" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
-
-async function loadApiKeys(force) {
-  var btn = document.getElementById('keysBtn');
-  var body = document.getElementById('keysBody');
-  if (btn) { btn.disabled = true; btn.textContent = '查询中...'; }
-  if (!body.innerHTML.trim()) body.innerHTML = '<div class="tip">正在查询各账号的 API Key...</div>';
-  try {
-    var data = await fetchKeys(!!force);
-    renderApiKeys(data);
-  } catch (e) {
-    body.innerHTML = '<div class="tip">查询失败：' + escHtml(e.message) + '</div>';
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '刷新'; }
-  }
-}
-
-function renderApiKeys(data) {
-  var accounts = data.accounts || [];
-  var h = '';
-  if (!accounts.length) h = '<div class="tip">还没有配置任何账号，请到「账号配置」页添加</div>';
-
-  accounts.forEach(function(a) {
-    var head = '<div class="account-header"><span class="name">' + escHtml(a.username || '未知') + '</span>';
-    if (a.error) {
-      var cls = (a.error.indexOf('过期') >= 0 || a.error.indexOf('未配置') >= 0) ? 'badge-warn' : 'badge-err';
-      h += '<div class="account-card">' + head + '<span class="badge ' + cls + '">' + escHtml(a.error) + '</span></div></div>';
-      return;
-    }
-    var keys = a.keys || [];
-    h += '<div class="account-card">' + head + '<span class="badge badge-ok">' + keys.length + ' 个 Key</span></div>';
-    if (!keys.length) { h += '<div class="empty-row">该账号暂无 API Key</div></div>'; return; }
-    h += '<table><tr><th>名称</th><th class="col-key">API Key</th><th>创建时间</th><th>状态</th></tr>';
-    keys.forEach(function(k) {
-      var uid = escHtml(k.id || '');
-      var user = escHtml(a.username || '');
-      h += '<tr><td>' + escHtml(k.name || '-') +
-           (k.is_default ? ' <span class="badge badge-plan">默认</span>' : '') + '</td>' +
-           '<td class="col-key"><code class="key-mono" data-mid="' + uid + '">' + escHtml(k.masked || '-') + '</code>' +
-             '<button class="key-icon" data-act="toggle" data-id="' + uid + '" data-user="' + user + '" title="显示/隐藏">' + SVG_EYE + '</button>' +
-             '<button class="key-icon" data-act="copy" data-id="' + uid + '" data-user="' + user + '" title="复制">' + SVG_COPY + '</button></td>' +
-           '<td>' + escHtml(k.create_time || '-') + '</td>' +
-           '<td>' + (k.status === 'enabled' ? '启用' : escHtml(k.status || '-')) + '</td></tr>';
-    });
-    h += '</table></div>';
-  });
-  document.getElementById('keysBody').innerHTML = h;
-}
 
 // 复制：优先异步剪贴板 API，被拒（如窗口未聚焦）时退回 execCommand
 function legacyCopy(text) {
@@ -1021,6 +1072,24 @@ async function openUpdateUrl(url) {
   window.open(url, '_blank');
 }
 
+// 自动更新：下载新版 exe → 交换 → 重启
+async function performUpdate() {
+  var btn = document.querySelector('[data-action="performUpdate"]');
+  if (btn) { btn.disabled = true; btn.textContent = '下载中...'; }
+  showToast('正在下载更新，完成后将自动重启…', 'info', 60000);
+  try {
+    var r = await window.pywebview.api.download_and_update();
+    if (r && !r.ok) {
+      showToast('更新失败: ' + (r.error || '未知错误'), 'error');
+      if (btn) { btn.disabled = false; btn.textContent = '立即更新'; }
+    }
+    // r.ok === true 时窗口正在被销毁，Promise 可能不会返回
+  } catch(e) {
+    showToast('更新失败: ' + (e && e.message ? e.message : '未知'), 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '立即更新'; }
+  }
+}
+
 async function loadSettings() {
   var box = document.getElementById('settingsBody');
   box.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
@@ -1066,9 +1135,14 @@ async function loadSettings() {
     var updateRow = '';
     if (d.update) {
       _updateUrl = d.update.url || '';
+      var canAuto = !!d.update.download_url;
       updateRow = '<div class="settings-row"><span class="k">更新</span>' +
-        '<span class="v" style="color:#ad6800">发现新版本 v' + escHtml(d.update.latest || '') +
-        '</span> <button class="btn btn-sm btn-primary" data-action="openUpdate">去下载</button></div>';
+        '<span class="v" style="color:#ad6800">发现新版本 v' + escHtml(d.update.latest || '') + '</span> ' +
+        (canAuto
+          ? '<button class="btn btn-sm btn-primary" data-action="performUpdate">立即更新</button>' +
+            '<span class="save-status" style="margin-left:8px">下载后自动重启</span>'
+          : '<button class="btn btn-sm btn-primary" data-action="openUpdate">去下载</button>') +
+        '</div>';
     }
     h += '<div class="settings-card"><h3 class="settings-title">关于</h3>' +
          '<div class="settings-row"><span class="k">版本</span><span class="v">' + escHtml(d.version) + '</span></div>' +
@@ -1124,8 +1198,8 @@ function tick() {
   renderCountdown();
 }
 
-// API Key 列表的「显示 / 复制」用事件委托，避免每次重绘都要重新绑定
-document.getElementById('keysBody').addEventListener('click', onKeyAction);
+// API Key 的「显示 / 复制」用事件委托，避免每次重绘都要重新绑定
+document.getElementById('accountRows').addEventListener('click', onKeyAction);
 
 // 图像生成页：上传区点击选择 / 拖拽放入 / 缩略图删除（事件委托）
 (function initIgUpload() {
@@ -1151,16 +1225,16 @@ document.getElementById('keysBody').addEventListener('click', onKeyAction);
   });
 })();
 
-// 账号配置：在密码框输入新密码时，撤销此前点「清密码」设的清除标记
+// 账号管理：在密码框输入新密码时，撤销此前点「清除密码」设的清除标记
 document.getElementById('accountRows').addEventListener('input', function(ev) {
-  if (!ev.target.matches || !ev.target.matches('.col-pass input')) return;
-  var row = ev.target.closest('.config-row');
-  if (!row || !ev.target.value) return;
-  if (row.dataset.clearPass === '1') {
-    row.dataset.clearPass = '';
-    row.querySelector('.col-pass input').placeholder =
-      row.dataset.hasPassword === '1' ? '留空沿用已保存密码' : '密码';
-    updateClearBtn(row);
+  if (!ev.target.matches || !ev.target.matches('.acct-card-pwd-row input')) return;
+  var card = ev.target.closest('.acct-card');
+  if (!card || !ev.target.value) return;
+  if (card.dataset.clearPass === '1') {
+    card.dataset.clearPass = '';
+    card.querySelector('.acct-card-pwd-row input').placeholder =
+      card.dataset.hasPassword === '1' ? '留空沿用已保存密码' : '密码';
+    updateClearBtn(card);
   }
 });
 
@@ -1176,13 +1250,14 @@ document.addEventListener('click', function(ev) {
     case 'loginAccount': loginAccount(el); break;
     case 'removeRow': removeRow(el); break;
     case 'clearPass': clearPass(el); break;
-    case 'loadApiKeys': loadApiKeys(true); break;
+    case 'loadAccountManagement': loadAccountManagement(true); break;
     case 'setIgMode': setIgMode(el.getAttribute('data-mode') || 't2i'); break;
     case 'generateImage': generateImage(); break;
     case 'cancelImage': cancelImage(); break;
     case 'downloadImage': downloadImage(); break;
     case 'saveSettings': saveSettings(); break;
     case 'openUpdate': if (_updateUrl) openUpdateUrl(_updateUrl); break;
+    case 'performUpdate': performUpdate(); break;
   }
 });
 
@@ -1223,5 +1298,5 @@ function initWindowControls() {
 
 initWindowControls();
 
-loadSettings().then(function() { return loadConfigRows(); }).then(function() { fetchUsage(); });
+loadSettings().then(function() { return loadAccountManagement(); }).then(function() { fetchUsage(); });
 setInterval(tick, 1000);

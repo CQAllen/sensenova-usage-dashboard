@@ -24,8 +24,7 @@
     <nav class="nav" aria-label="主导航">
       <button class="nav-item active" data-page="overview" data-action="showPage" aria-current="page">账号总览</button>
       <button class="nav-item" data-page="detail" data-action="showPage">账号明细</button>
-      <button class="nav-item" data-page="config" data-action="showPage">账号配置</button>
-      <button class="nav-item" data-page="apikeys" data-action="showPage">API Key</button>
+      <button class="nav-item" data-page="config" data-action="showPage">账号管理</button>
       <button class="nav-item" data-page="imagegen" data-action="showPage">图像生成</button>
       <button class="nav-item" data-page="settings" data-action="showPage">系统设置</button>
     </nav>
@@ -52,10 +51,12 @@
     </section>
 
     <section class="page" id="page-config">
-      <h2 class="page-title">账号配置</h2>
+      <div class="page-head">
+        <h2 class="page-title">账号管理</h2>
+        <button class="btn btn-sm" id="configRefreshBtn" data-action="loadAccountManagement">刷新</button>
+      </div>
       <div class="howto">
-        填写「用户名」「密码」后点 <b>登录</b>，自动换取并保存 JWT；约 3 小时过期后会用保存的密码自动重新登录，无需再管。<br>
-        保存后窗口不再回显密码，密码框留空即沿用已保存的密码。凭据仅加密保存在本机。
+        每个账号一张卡片，点击展开可登录、查看 API Key。点 <b>登录</b> 自动换取 JWT；密码留空即沿用已保存值。凭据仅加密保存在本机。
       </div>
       <div id="accountRows"></div>
       <div class="config-actions">
@@ -63,18 +64,6 @@
         <button class="btn btn-sm btn-primary" id="saveConfigBtn" data-action="saveConfig">保存配置</button>
         <span class="save-status" id="saveStatus">已保存</span>
       </div>
-    </section>
-
-    <section class="page" id="page-apikeys">
-      <div class="page-head">
-        <h2 class="page-title">API Key 管理</h2>
-        <button class="btn btn-sm" id="keysBtn" data-action="loadApiKeys">刷新</button>
-      </div>
-      <div class="howto">
-        API Key 默认脱敏显示。点 <b>显示</b> 才会向本地服务单独取一次明文，点 <b>复制</b> 可直接复制到剪贴板；
-        明文只在当前页面内存中保留，切换页面或重启后需重新获取。本页为只读，不支持新建 / 删除 Key。
-      </div>
-      <div id="keysBody"></div>
     </section>
 
     <section class="page" id="page-imagegen">
