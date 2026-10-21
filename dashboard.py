@@ -320,6 +320,49 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"api_key": value})
             except Exception as e:
                 self._send_json(404, {"error": accounts.sanitize_error(e)})
+        elif path == "/api/history":
+            # 用量趋势数据——读本地 SQLite，不触网，不限流
+            q = parse_qs(urlsplit(self.path).query)
+            try:
+                import history
+                username = (q.get("username") or [""])[0] or None
+                window = (q.get("window") or [""])[0] or None
+                pool_name = (q.get("pool") or [""])[0] or None
+                try:
+                    hours = int((q.get("hours") or ["24"])[0])
+                except (TypeError, ValueError):
+                    self._send_json(400, {"error": "hours 参数无效"})
+                    return
+                if hours not in (24, 168, 720):
+                    self._send_json(400, {"error": "hours 仅支持 24 / 168 / 720"})
+                    return
+                if window and window not in ("5h", "7d"):
+                    self._send_json(400, {"error": "window 参数无效"})
+                    return
+                data = history.get_history(accounts.BASE_DIR, username=username,
+                                           pool_name=pool_name, window=window, hours=hours)
+                cutoff = history.get_last_ts(accounts.BASE_DIR)
+                if username and data:
+                    # 截止时间跟随所选账号，避免展示其他账号的更新时间
+                    cutoff = max(p["ts"] for g in data for p in g["points"])
+                self._send_json(200, {"snapshots": data, "cutoff_ts": cutoff})
+            except Exception as e:
+                self._send_json(500, {"error": accounts.sanitize_error(e)})
+        elif path == "/api/prediction":
+            # 耗尽预测——读本地 SQLite，不触网；按「积分池 × 窗口」返回
+            q = parse_qs(urlsplit(self.path).query)
+            try:
+                import history
+                username = (q.get("username") or [""])[0]
+                if not username:
+                    self._send_json(200, {"predictions": []})
+                    return
+                if not any(a.get("username") == username for a in accounts.load_accounts()):
+                    self._send_json(200, {"predictions": []})
+                    return
+                self._send_json(200, {"predictions": history.get_predictions(accounts.BASE_DIR, username)})
+            except Exception as e:
+                self._send_json(500, {"error": accounts.sanitize_error(e)})
         elif path == "/api/imagedl":
             # 锚点跳转下载：返回缓存中的原始图像字节，带 Content-Disposition 触发原生保存
             q = parse_qs(urlsplit(self.path).query)
@@ -389,6 +432,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"success": True, "settings": settings})
             except Exception as e:
                 self._send_json(400, {"success": False, "error": accounts.sanitize_error(e)})
+
+        elif path == "/api/clear-history":
+            try:
+                import history
+                history.clear_all(accounts.BASE_DIR)
+                self._send_json(200, {"success": True})
+            except Exception as e:
+                self._send_json(500, {"success": False, "error": accounts.sanitize_error(e)})
 
         elif path == "/api/login":
             username = (data.get("username") or "").strip()

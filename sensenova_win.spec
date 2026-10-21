@@ -8,7 +8,7 @@ binaries = []
 hiddenimports = [
     'webview.platforms.edgechromium', 'webview.platforms.winforms',
     'requests', 'jwcrypto', 'cryptography',
-    'auth_login', 'credstore', 'accounts', 'sensenova_api', 'imagegen',
+    'auth_login', 'credstore', 'accounts', 'sensenova_api', 'imagegen', 'history',
 ]
 for pkg in ('webview', 'pythonnet', 'clr_loader'):
     d, b, h = collect_all(pkg)

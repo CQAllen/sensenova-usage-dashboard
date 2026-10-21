@@ -37,6 +37,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 
 # 保证可以从任意工作目录运行
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -450,6 +451,186 @@ finally:
     sensenova_api.query_api_keys = orig_qak
     sensenova_api.clear_api_key_cache()
     accounts.merge_accounts([])
+
+# ============================================================
+# 10. 用量历史与预测
+# ============================================================
+section("10. 用量历史与预测")
+
+import history as history_mod
+
+HIST_DIR = tempfile.mkdtemp(prefix="sn-hist-")
+history_mod.init_db(HIST_DIR)
+check("init_db 建表成功", os.path.exists(os.path.join(HIST_DIR, history_mod.DB_NAME)))
+
+# 构造假查询结果
+fake_result = {
+    "timestamp": "t",
+    "accounts": [{
+        "username": "histuser",
+        "error": None,
+        "items": [{
+            "pool_name": "通用积分池", "pool_type": "default",
+            "limit_5h_raw": 10000.0, "used_5h_raw": 6000.0, "remain_5h_raw": 4000.0,
+            "reset_at_ts": int(time.time()) + 18000,
+            "limit_7d_raw": 50000.0, "used_7d_raw": 30000.0, "remain_7d_raw": 20000.0,
+            "reset_at_7d_ts": int(time.time()) + 600000,
+        }],
+    }],
+}
+
+# 写入快照
+n = history_mod.record_snapshots(HIST_DIR, fake_result)
+check("快照写入成功", n > 0, n)
+
+# 去重：60 秒内同 key 不重复
+n2 = history_mod.record_snapshots(HIST_DIR, fake_result)
+check("60 秒内去重不重复写", n2 == 0, n2)
+
+# 查询历史
+data = history_mod.get_history(HIST_DIR, username="histuser", hours=24)
+check("历史查询返回数据", len(data) > 0, len(data))
+check("历史包含 histuser", any(g["username"] == "histuser" for g in data))
+check("历史包含 5h 窗口", any(g["window"] == "5h" for g in data))
+check("历史包含 7d 窗口", any(g["window"] == "7d" for g in data))
+check("历史数据点有 pct", "pct" in data[0]["points"][0] if data and data[0]["points"] else False)
+check("历史数据点有 reset_at", all("reset_at" in p for g in data for p in g["points"]))
+
+# 预测：数据不足（只有 1 条快照）
+pred = history_mod.predict_depletion(HIST_DIR, "histuser", "通用积分池", "5h", 4000.0, int(time.time()) + 18000)
+check("数据不足时预测提示", "数据不足" in pred["prediction"], pred["prediction"])
+check("数据不足 → status=insufficient", pred["status"] == "insufficient", pred)
+
+# 写入更多快照（模拟时间推进）
+base_ts = time.time() - 3600  # 1 小前开始
+reset_ts = int(time.time()) + 18000
+with history_mod._connect(HIST_DIR) as db:
+    for i in range(5):
+        t = base_ts + i * 900  # 每 15 分钟一条
+        used = 6000 + i * 800
+        db.execute(
+            "INSERT INTO snapshots (ts, username, pool_name, pool_type, window, "
+            "limit_val, used_val, remain_val, reset_at_ts, pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (t, "histuser", "通用积分池", "default", "5h",
+             10000.0, used, 10000.0 - used, reset_ts,
+             round(used / 10000.0 * 100, 1))
+        )
+
+# 预测：有足够数据
+pred2 = history_mod.predict_depletion(HIST_DIR, "histuser", "通用积分池", "5h", 1000.0, reset_ts)
+check("预测有结果", pred2["prediction"] != "", pred2["prediction"])
+check("预测速率 > 0", pred2["rate"] > 0, pred2["rate"])
+check("可耗尽 → status=will_deplete", pred2["status"] == "will_deplete", pred2)
+
+# 剩余量可撑过重置 → safe（不该被文案里的“耗尽”误判）
+pred_safe = history_mod.predict_depletion(HIST_DIR, "histuser", "通用积分池", "5h",
+                                          1000.0, int(time.time()) + 60)
+check("撑过重置 → status=safe", pred_safe["status"] == "safe", pred_safe)
+
+# 已耗尽
+pred3 = history_mod.predict_depletion(HIST_DIR, "histuser", "通用积分池", "5h", 0, reset_ts)
+check("剩余为 0 时提示已耗尽", "耗尽" in pred3["prediction"], pred3["prediction"])
+check("已耗尽 → status=depleted", pred3["status"] == "depleted", pred3)
+
+# 无消耗：7d 窗口用量恒定
+reset7 = int(time.time()) + 600000
+with history_mod._connect(HIST_DIR) as db:
+    for i in range(5):
+        t = base_ts + i * 900
+        db.execute(
+            "INSERT INTO snapshots (ts, username, pool_name, pool_type, window, "
+            "limit_val, used_val, remain_val, reset_at_ts, pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (t, "histuser", "通用积分池", "default", "7d",
+             50000.0, 30000.0, 20000.0, reset7, 60.0)
+        )
+pred4 = history_mod.predict_depletion(HIST_DIR, "histuser", "通用积分池", "7d", 20000.0, reset7)
+check("无消耗 → status=no_consumption", pred4["status"] == "no_consumption", pred4)
+
+# 按池 × 窗口返回预测，不同窗口不串值
+preds = history_mod.get_predictions(HIST_DIR, "histuser")
+check("预测按池×窗口返回 2 项", len(preds) == 2, preds)
+check("预测覆盖 5h / 7d", sorted(p["window"] for p in preds) == ["5h", "7d"], preds)
+check("预测项带池名与状态",
+      all(p["pool_name"] == "通用积分池" and p["status"] for p in preds), preds)
+by_win = {p["window"]: p for p in preds}
+check("5h 预测为 will_deplete", by_win["5h"]["status"] == "will_deplete", by_win.get("5h"))
+check("7d 预测为 no_consumption", by_win["7d"]["status"] == "no_consumption", by_win.get("7d"))
+check("不同窗口预测不串值",
+      by_win["5h"]["rate"] > 0 and by_win["7d"]["rate"] == 0, preds)
+
+# 清理
+history_mod.clear_all(HIST_DIR)
+data_after = history_mod.get_history(HIST_DIR, hours=24)
+check("清除后历史为空", len(data_after) == 0, len(data_after))
+
+shutil.rmtree(HIST_DIR, ignore_errors=True)
+
+# ============================================================
+# 11. HTTP 历史与预测接口
+# ============================================================
+section("11. /api/history 与 /api/prediction")
+
+API_HIST_USER = "apihist"
+accounts.merge_accounts([{"username": API_HIST_USER}])
+history_mod.init_db(accounts.BASE_DIR)
+_now = time.time()
+
+
+def seed(user, pool, ptype, window, limit, uses, reset_ts):
+    with history_mod._connect(accounts.BASE_DIR) as db:
+        for i, used in enumerate(uses):
+            db.execute(
+                "INSERT INTO snapshots (ts, username, pool_name, pool_type, window, "
+                "limit_val, used_val, remain_val, reset_at_ts, pct) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (_now - 3600 + i * 900, user, pool, ptype, window, limit, used,
+                 limit - used, reset_ts, round(used / limit * 100, 1))
+            )
+
+
+seed(API_HIST_USER, "池A", "default", "5h", 10000.0, [1000, 2000, 3000, 4000, 5000],
+     int(_now) + 18000)
+seed(API_HIST_USER, "池A", "default", "7d", 100000.0,
+     [20000, 30000, 40000, 50000, 60000], int(_now) + 600000)
+seed(API_HIST_USER, "池B", "dedicated", "5h", 1000.0, [100, 100, 100, 100, 100],
+     int(_now) + 18000)
+
+_st, bd, _ = req("GET", "/api/history?hours=24")
+check("/api/history 合法 hours → 200", _st == 200, (_st, bd))
+_body = json.loads(bd)
+check("history 返回 snapshots 列表", isinstance(_body.get("snapshots"), list), _body)
+check("history 点含 reset_at",
+      all("reset_at" in p for g in _body["snapshots"] for p in g["points"]), _body)
+check("history 非法 hours → 400", req("GET", "/api/history?hours=12")[0] == 400)
+check("history 非数字 hours → 400", req("GET", "/api/history?hours=abc")[0] == 400)
+check("history 非法 window → 400", req("GET", "/api/history?hours=24&window=1h")[0] == 400)
+_st, bd, _ = req("GET", "/api/history?hours=24&window=5h")
+check("history 按 window 过滤",
+      _st == 200 and all(g["window"] == "5h" for g in json.loads(bd)["snapshots"]), bd)
+_st, bd, _ = req("GET", "/api/history?hours=24&username=" + API_HIST_USER)
+check("history 按 username 过滤",
+      _st == 200 and all(g["username"] == API_HIST_USER for g in json.loads(bd)["snapshots"]), bd)
+_st, bd, _ = req("GET", "/api/history?hours=24&pool=" + urllib.parse.quote("池A"))
+check("history 按 pool 过滤",
+      _st == 200 and all(g["pool_name"] == "池A" for g in json.loads(bd)["snapshots"]), bd)
+
+_st, bd, _ = req("GET", "/api/prediction?username=" + API_HIST_USER)
+check("/api/prediction 返回 200", _st == 200, (_st, bd))
+preds_api = json.loads(bd).get("predictions", [])
+check("预测按池×窗口返回 3 项", len(preds_api) == 3, preds_api)
+check("预测覆盖两个池", sorted({p["pool_name"] for p in preds_api}) == ["池A", "池B"], preds_api)
+by_key = {(p["pool_name"], p["window"]): p for p in preds_api}
+check("池A/5h 预测为 will_deplete",
+      by_key[("池A", "5h")]["status"] == "will_deplete"
+      and by_key[("池A", "5h")]["rate"] == 4000.0, preds_api)
+check("池A/7d 使用自己的速率（不串值）",
+      by_key[("池A", "7d")]["rate"] == 40000.0, preds_api)
+check("池B 无消耗且速率独立",
+      by_key[("池B", "5h")]["status"] == "no_consumption"
+      and by_key[("池B", "5h")]["rate"] == 0, preds_api)
+check("未保存的账号 → 空预测",
+      json.loads(req("GET", "/api/prediction?username=nouser")[1])["predictions"] == [])
+check("缺 username → 空预测", json.loads(req("GET", "/api/prediction")[1])["predictions"] == [])
 
 # ============================================================
 # 收尾

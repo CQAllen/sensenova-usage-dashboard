@@ -274,6 +274,9 @@ def parse_pool_data(raw: dict) -> list[dict]:
             "limit_5h": fmt_num(limit_5h),
             "used_5h": fmt_num(used_5h),
             "remain_5h": fmt_num(remain_5h),
+            "limit_5h_raw": limit_5h,
+            "used_5h_raw": used_5h,
+            "remain_5h_raw": remain_5h,
             "usage_pct_5h": pct_5h,
             "reset_at": ts_to_str(w5h.get("reset_at", "")),
             "reset_at_ts": _to_ts(w5h.get("reset_at", "")),
@@ -282,6 +285,9 @@ def parse_pool_data(raw: dict) -> list[dict]:
             "limit_7d": fmt_num(limit_7d),
             "used_7d": fmt_num(used_7d),
             "remain_7d": fmt_num(remain_7d),
+            "limit_7d_raw": limit_7d,
+            "used_7d_raw": used_7d,
+            "remain_7d_raw": remain_7d,
             "usage_pct_7d": pct_7d,
             "grant_balance": fmt_num(grant_f),
             "nearest_expiry": ts_to_date(pool.get("nearest_grant_expiry", "0")),
@@ -451,8 +457,15 @@ def query_all_accounts() -> dict:
         raw = query_pool_usage(token, timeout)
         return {"items": parse_pool_data(raw), "plan": parse_plan(raw)}
 
-    return {"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "accounts": _collect_accounts(_fetch, empty={"items": []})}
+    result = {"timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+              "accounts": _collect_accounts(_fetch, empty={"items": []})}
+    # 记录用量快照——失败不影响查询结果展示
+    try:
+        import history
+        history.record_snapshots(accounts.BASE_DIR, result)
+    except Exception:
+        pass
+    return result
 
 
 def query_all_api_keys() -> dict:

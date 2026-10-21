@@ -20,6 +20,12 @@ accounts.key
 auth_login_last_error.log
 sensenova_app.log
 
+# 本地用量历史库（运行时生成，含账号用量明细）
+usage_history.db
+usage_history.db-journal
+usage_history.db-wal
+usage_history.db-shm
+
 # IDE
 .idea/
 .vscode/

@@ -579,6 +579,34 @@ function renderOverview(data) {
                   'Flash-Lite专属积分池-7d', dedCount + ' 个账号合计', earliest7dResetD);
   h += '</div>';
 
+  // 用量趋势（可折叠）
+  var trendUsers = accounts.filter(function(a) { return a.username; }).map(function(a) { return a.username; });
+  if (_trendUser && trendUsers.indexOf(_trendUser) < 0) _trendUser = '';
+  h += '<div class="trends-section' + (_trendExpanded ? ' expanded' : '') + '" id="trendsSection">';
+  h += '<div class="trends-header" id="trendsHeader">';
+  h += '<span class="trends-toggle" id="trendsToggle">&#9656;</span>';
+  h += '<span class="trends-title">用量趋势</span>';
+  h += '<span class="trends-cutoff" id="trendsCutoff"></span>';
+  h += '<select class="trends-account-sel" id="trendsUser" title="选择账号">';
+  h += '<option value="">全部账号</option>';
+  trendUsers.forEach(function(u) {
+    h += '<option value="' + escHtml(u) + '"' + (u === _trendUser ? ' selected' : '') + '>' + escHtml(u) + '</option>';
+  });
+  h += '</select>';
+  h += '<div class="trends-metric">';
+  h += '<button class="trends-range-btn' + (_trendMetric === 'used' ? ' active' : '') + '" data-metric="used">已用量</button>';
+  h += '<button class="trends-range-btn' + (_trendMetric === 'remain' ? ' active' : '') + '" data-metric="remain">剩余量</button>';
+  h += '<button class="trends-range-btn' + (_trendMetric === 'pct' ? ' active' : '') + '" data-metric="pct">使用率</button>';
+  h += '</div>';
+  h += '<div class="trends-range">';
+  [[24, '24小时'], [168, '7天'], [720, '30天']].forEach(function(r) {
+    h += '<button class="trends-range-btn' + (_trendRange === r[0] ? ' active' : '') + '" data-range="' + r[0] + '">' + r[1] + '</button>';
+  });
+  h += '</div>';
+  h += '</div>';
+  h += '<div class="trends-body" id="trendsBody"></div>';
+  h += '</div>';
+
   h += '<div class="account-card"><div class="account-header"><span class="name">各账号使用情况</span>' +
        '<span class="badge badge-ok">按积分池分类</span></div><table>';
   h += '<tr><th>账号</th>' +
@@ -611,6 +639,196 @@ function renderOverview(data) {
   document.getElementById('overviewBody').innerHTML = h;
   updateResetCells();
   animateRings([['ring5h', pct5h], ['ring7d', pct7d], ['ring5hD', pct5hD], ['ring7dD', pct7dD]]);
+  initTrends();
+}
+
+// ---------- 用量趋势 ----------
+var _trendRange = 24;
+var _trendExpanded = false;
+var _trendUser = '';
+var _trendMetric = 'used';
+
+function initTrends() {
+  var header = document.getElementById('trendsHeader');
+  if (header) {
+    header.onclick = function(ev) {
+      if (ev.target.closest('button, select')) return;
+      var sec = document.getElementById('trendsSection');
+      if (!sec) return;
+      _trendExpanded = !_trendExpanded;
+      sec.classList.toggle('expanded', _trendExpanded);
+      if (_trendExpanded) loadTrends();
+    };
+  }
+  document.querySelectorAll('.trends-range-btn').forEach(function(btn) {
+    btn.onclick = function(ev) {
+      ev.stopPropagation();
+      var metric = this.getAttribute('data-metric');
+      if (metric) {
+        if (metric === _trendMetric) return;
+        _trendMetric = metric;
+        document.querySelectorAll('.trends-range-btn[data-metric]').forEach(function(b) { b.classList.remove('active'); });
+        this.classList.add('active');
+        loadTrends();
+        return;
+      }
+      var r = parseInt(this.getAttribute('data-range'), 10) || 24;
+      if (r === _trendRange) return;
+      _trendRange = r;
+      document.querySelectorAll('.trends-range-btn[data-range]').forEach(function(b) { b.classList.remove('active'); });
+      this.classList.add('active');
+      loadTrends();
+    };
+  });
+  var sel = document.getElementById('trendsUser');
+  if (sel) {
+    sel.onchange = function() {
+      _trendUser = this.value;
+      loadTrends();
+    };
+    sel.onclick = function(ev) { ev.stopPropagation(); };
+  }
+  // 自动刷新会重建 DOM，展开状态保留时需要重新拉取数据
+  if (_trendExpanded) loadTrends();
+}
+
+async function loadTrends() {
+  var body = document.getElementById('trendsBody');
+  if (!body) return;
+  body.innerHTML = '<div class="trend-empty">加载中...</div>';
+  var url = '/api/history?hours=' + _trendRange;
+  if (_trendUser) url += '&username=' + encodeURIComponent(_trendUser);
+  try {
+    var resp = await apiFetch(url);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    var data = await resp.json();
+    var cutoff = document.getElementById('trendsCutoff');
+    if (cutoff && data.cutoff_ts) {
+      var d = new Date(data.cutoff_ts * 1000);
+      cutoff.textContent = '数据截止 ' + two(d.getHours()) + ':' + two(d.getMinutes());
+    }
+    var groups = data.snapshots || [];
+    // 全部账号只画通用积分池 5h，避免几十条线挤在一张图里
+    if (!_trendUser) {
+      groups = groups.filter(function(g) { return g.pool_type === 'default' && g.window === '5h'; });
+    }
+    if (!groups.length) {
+      body.innerHTML = '<div class="trend-empty">' +
+        (_trendUser ? '该账号暂无足够历史数据' : '暂无历史数据，保持应用运行以积累趋势') + '</div>';
+      return;
+    }
+    renderTrendChart(groups, body);
+  } catch(e) {
+    body.innerHTML = '<div class="trend-empty">加载失败</div>';
+  }
+}
+
+function two(n) { return n < 10 ? '0' + n : String(n); }
+
+function axisLabel(ts, hours) {
+  var d = new Date(ts * 1000);
+  var hm = two(d.getHours()) + ':' + two(d.getMinutes());
+  return hours > 48 ? (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm : hm;
+}
+
+function shortNum(v) {
+  if (v >= 10000) return (v / 10000).toFixed(v >= 100000 ? 0 : 1) + '万';
+  return String(Math.round(v));
+}
+
+function renderTrendChart(groups, container) {
+  var w = Math.max(360, (container.clientWidth || 800) - 32);
+  var h = 180, pad = {l: 44, r: 10, t: 10, b: 28};
+  var cw = w - pad.l - pad.r, ch = h - pad.t - pad.b;
+
+  // 指标取值：已用量 / 剩余量 / 使用率
+  function metricValue(p) {
+    if (_trendMetric === 'pct') return p.pct || 0;
+    if (_trendMetric === 'used') return p.used || 0;
+    return p.remain || 0;
+  }
+
+  var minTs = Infinity, maxTs = -Infinity, maxVal = _trendMetric === 'pct' ? 100 : 0;
+  groups.forEach(function(g) {
+    g.points.forEach(function(p) {
+      if (p.ts < minTs) minTs = p.ts;
+      if (p.ts > maxTs) maxTs = p.ts;
+      var v = metricValue(p);
+      if (v > maxVal) maxVal = v;
+    });
+  });
+  if (!isFinite(minTs)) {
+    container.innerHTML = '<div class="trend-empty">暂无历史数据</div>';
+    return;
+  }
+  if (minTs === maxTs) maxTs = minTs + 3600;
+  if (maxVal <= 0) maxVal = 1;
+
+  function x(ts) { return pad.l + (ts - minTs) / (maxTs - minTs) * cw; }
+  function y(v) {
+    var t = _trendMetric === 'pct' ? Math.min(v, 100) / maxVal : v / maxVal;
+    return pad.t + (1 - t) * ch;
+  }
+
+  var colors = ['#0958d9', '#722ed1', '#52c41a', '#fa8c16', '#13c2c2', '#eb2f96', '#2f54eb', '#a0d911'];
+  var svg = '<svg class="trend-chart" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">';
+  for (var i = 0; i <= 4; i++) {
+    var val = maxVal * (1 - i / 4);
+    var yy = y(val);
+    svg += '<line x1="' + pad.l + '" y1="' + yy.toFixed(1) + '" x2="' + (w - pad.r) + '" y2="' + yy.toFixed(1) + '" stroke="#eee" stroke-width="1"/>';
+    svg += '<text x="' + (pad.l - 6) + '" y="' + (yy + 3).toFixed(1) + '" text-anchor="end" font-size="10" fill="#999">' +
+           (_trendMetric === 'pct' ? Math.round(val) + '%' : shortNum(val)) + '</text>';
+  }
+  // X 轴时间标签
+  [minTs, (minTs + maxTs) / 2, maxTs].forEach(function(ts, idx) {
+    var anchor = idx === 0 ? 'start' : (idx === 2 ? 'end' : 'middle');
+    svg += '<text x="' + x(ts).toFixed(1) + '" y="' + (h - 8) + '" text-anchor="' + anchor +
+           '" font-size="10" fill="#999">' + escHtml(axisLabel(ts, _trendRange)) + '</text>';
+  });
+
+  var totalPoints = 0;
+  groups.forEach(function(g) { totalPoints += g.points.length; });
+  var drawPoints = totalPoints <= 400;
+
+  var legend = '';
+  groups.forEach(function(g, idx) {
+    var color = colors[idx % colors.length];
+    // 按重置周期拆线，避免曲线跨周期连成一条假线
+    var segs = [], cur = [];
+    g.points.forEach(function(p) {
+      if (cur.length && p.reset_at !== cur[cur.length - 1].reset_at) {
+        segs.push(cur);
+        cur = [];
+      }
+      cur.push(p);
+    });
+    if (cur.length) segs.push(cur);
+
+    segs.forEach(function(seg) {
+      if (seg.length < 2) return;
+      var pts = seg.map(function(p) {
+        return x(p.ts).toFixed(1) + ',' + y(metricValue(p)).toFixed(1);
+      }).join(' ');
+      svg += '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5" stroke-linejoin="round"/>';
+    });
+
+    if (drawPoints) {
+      g.points.forEach(function(p) {
+        var value = metricValue(p);
+        var tip = g.username + ' · ' + g.pool_name + ' · ' + g.window +
+                  ' · ' + axisLabel(p.ts, _trendRange) +
+                  ' · 已用 ' + fmt(p.used) + ' · 使用率 ' + (p.pct || 0).toFixed(1) + '%' +
+                  ' · 剩余 ' + fmt(p.remain);
+        svg += '<circle cx="' + x(p.ts).toFixed(1) + '" cy="' + y(value).toFixed(1) +
+               '" r="2" fill="' + color + '"><title>' + escHtml(tip) + '</title></circle>';
+      });
+    }
+
+    legend += '<span class="trend-legend-dot" style="background:' + color + '"></span>' +
+              escHtml(g.username + ' · ' + g.pool_name + ' · ' + g.window) + '  ';
+  });
+  svg += '</svg>';
+  container.innerHTML = svg + '<div class="trend-legend">' + legend + '</div>';
 }
 
 // ---------- 账号明细 ----------
@@ -652,8 +870,10 @@ function renderDetail(data) {
       h += '<div class="acct-pool-top"><span class="tag '+tagCls+'">'+tagText+'</span>'+escHtml(item.pool_name)+'</div>';
       h += '<div class="acct-metric"><span class="acct-k">5h</span><span class="pool-bar"><span class="pool-bar-fill '+barCls(pct)+'" style="width:'+Math.min(pct,100)+'%"></span></span><span class="acct-pct" style="color:'+pctColor(pct)+'">'+pct.toFixed(1)+'%</span></div>';
       h += '<div class="acct-sub">已用 '+escHtml(item.used_5h)+' / '+escHtml(item.limit_5h)+' · 剩 '+escHtml(item.remain_5h)+'</div>';
+      h += '<div class="acct-sub pred-line" data-user="' + escHtml(a.username) + '" data-pool="' + escHtml(item.pool_name) + '" data-window="5h"></div>';
       h += '<div class="acct-metric"><span class="acct-k">7d</span><span class="pool-bar"><span class="pool-bar-fill '+barCls(pct7)+'" style="width:'+Math.min(pct7,100)+'%"></span></span><span class="acct-pct" style="color:'+pctColor(pct7)+'">'+pct7.toFixed(1)+'%</span></div>';
       h += '<div class="acct-sub">已用 '+escHtml(item.used_7d)+' / '+escHtml(item.limit_7d)+' · 剩 '+escHtml(item.remain_7d)+'</div>';
+      h += '<div class="acct-sub pred-line" data-user="' + escHtml(a.username) + '" data-pool="' + escHtml(item.pool_name) + '" data-window="7d"></div>';
       h += '<div class="acct-sub">赠送余额 '+grantText+'</div>';
       h += '<div class="acct-sub">刷新 '+escHtml(item.reset_at)+' / '+escHtml(item.reset_at_7d)+'</div>';
       h += '</div>';
@@ -662,6 +882,31 @@ function renderDetail(data) {
   });
   h += '</div>';
   document.getElementById('detailBody').innerHTML = h;
+  loadDetailPredictions(accounts);
+}
+
+// 明细页预测文案：异步取 /api/prediction，填入 .pred-line
+async function loadDetailPredictions(accounts) {
+  var users = {};
+  accounts.forEach(function(a) { if (!a.error && a.username) users[a.username] = true; });
+  Object.keys(users).forEach(async function(uname) {
+    try {
+      var resp = await apiFetch('/api/prediction?username=' + encodeURIComponent(uname));
+      if (!resp.ok) return;
+      var d = await resp.json();
+      var nodes = document.querySelectorAll('.pred-line');
+      (d.predictions || []).forEach(function(p) {
+        nodes.forEach(function(el) {
+          if (el.dataset.user !== uname ||
+              el.dataset.pool !== p.pool_name ||
+              el.dataset.window !== p.window) return;
+          el.textContent = '  ' + (p.prediction || '');
+          el.style.color = p.status === 'depleted' ? 'var(--danger)'
+                         : (p.status === 'will_deplete' ? 'var(--warning)' : 'var(--text-tertiary)');
+        });
+      });
+    } catch(e) { /* 静默 */ }
+  });
 }
 
 // ---------- API Key 管理 ----------
@@ -1144,6 +1389,10 @@ async function loadSettings() {
           : '<button class="btn btn-sm btn-primary" data-action="openUpdate">去下载</button>') +
         '</div>';
     }
+    h += '<div class="settings-card"><h3 class="settings-title">数据管理</h3>' +
+         '<div class="settings-row"><span class="k">用量历史</span><span class="v">保留 90 天，仅存本机</span>' +
+         '<button class="btn btn-sm" data-action="clearHistory">清除用量历史</button></div></div>';
+
     h += '<div class="settings-card"><h3 class="settings-title">关于</h3>' +
          '<div class="settings-row"><span class="k">版本</span><span class="v">' + escHtml(d.version) + '</span></div>' +
          updateRow +
@@ -1176,6 +1425,19 @@ async function saveSettings() {
     } else { showToast('保存失败: ' + (d.error || ''), 'error'); }
   } catch(e) { showToast('保存失败: ' + e.message, 'error'); }
   finally { done(); }
+}
+
+async function clearHistory() {
+  if (!confirm('确认清除全部用量历史？此操作不可恢复。')) return;
+  try {
+    var resp = await apiFetch('/api/clear-history', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'});
+    var d = await resp.json();
+    if (d.success) {
+      showToast('用量历史已清除', 'success');
+      if (_trendExpanded) loadTrends();
+    }
+    else showToast('清除失败: ' + (d.error || ''), 'error');
+  } catch(e) { showToast('清除失败: ' + e.message, 'error'); }
 }
 
 function card(label, value, color) { return '<div class="summary-card"><div class="label">'+escHtml(label)+'</div><div class="value" style="'+(color?'color:'+color:'')+'">'+escHtml(value)+'</div></div>'; }
@@ -1256,6 +1518,7 @@ document.addEventListener('click', function(ev) {
     case 'cancelImage': cancelImage(); break;
     case 'downloadImage': downloadImage(); break;
     case 'saveSettings': saveSettings(); break;
+    case 'clearHistory': clearHistory(); break;
     case 'openUpdate': if (_updateUrl) openUpdateUrl(_updateUrl); break;
     case 'performUpdate': performUpdate(); break;
   }
