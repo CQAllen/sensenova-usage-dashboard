@@ -56,6 +56,51 @@ function showVersionAnnouncement() {
   };
 }
 
+// 发现新版本：主动弹窗（不只是设置页里显示一行）
+function showUpdateAvailable(update) {
+  var ver = update.latest || '';
+  var canAuto = !!update.download_url;
+  var overlay = document.createElement('div');
+  overlay.className = 'va-overlay';
+  overlay.innerHTML =
+    '<div class="va-card">' +
+      '<div class="va-header">' +
+        '<span class="va-version">发现新版本 v' + escHtml(ver) + '</span>' +
+      '</div>' +
+      '<div class="va-text" style="font-size:var(--font-sm);color:var(--text-secondary);line-height:1.6;margin-bottom:16px">' +
+        '检测到 GitHub Release 已发布新版本。更新后可获得最新功能与修复。</div>' +
+      '<div class="va-actions" style="display:flex;gap:8px;justify-content:flex-end">' +
+        '<button class="btn btn-sm va-later">稍后</button>' +
+        (canAuto
+          ? '<button class="btn btn-primary btn-sm va-update">立即更新</button>'
+          : '<button class="btn btn-primary btn-sm va-goto">去下载</button>') +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+
+  function dismiss() {
+    localStorage.setItem('_seenUpdate_' + ver, '1');
+    overlay.remove();
+  }
+
+  overlay.querySelector('.va-later').onclick = function() {
+    dismiss();
+    // 稍后后，下次启动还会弹（只存「已看过」但不存「不再提示」）
+  };
+
+  var updateBtn = overlay.querySelector('.va-update');
+  if (updateBtn) updateBtn.onclick = function() {
+    dismiss();
+    performUpdate();
+  };
+
+  var gotoBtn = overlay.querySelector('.va-goto');
+  if (gotoBtn) gotoBtn.onclick = function() {
+    dismiss();
+    if (update.url) openUpdateUrl(update.url);
+  };
+}
+
 // ---------- Toast 通知 ----------
 function showToast(msg, type, ms) {
   type = type || 'info';
@@ -1422,6 +1467,14 @@ async function loadSettings() {
     _monitorPaused = !!(d.monitor && d.monitor.paused);
     _closeBehavior = (d.settings && d.settings.close_behavior) || 'exit';
     _trayAvailable = !!(d.monitor && d.monitor.tray_available);
+
+    // 发现新版本：主动弹出通知（不只是设置页里显示）
+    if (d.update && d.update.latest) {
+      var updKey = '_seenUpdate_' + d.update.latest;
+      if (localStorage.getItem(updKey) !== '1') {
+        showUpdateAvailable(d.update);
+      }
+    }
 
     var opts = '';
     REFRESH_OPTIONS.forEach(function(o) {
