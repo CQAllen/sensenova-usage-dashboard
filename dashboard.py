@@ -87,7 +87,7 @@ def _resolve_port() -> int:
 SERVER_PORT = _resolve_port()
 MAX_BODY_BYTES = 64 * 1024                  # POST 请求体上限
 MAX_IMAGE_BODY_BYTES = 32 * 1024 * 1024     # 图片编辑请求体上限（最多 5 张 base64 参考图）
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 
 # 发布仓库：更新检查会查这个 repo 的 GitHub Releases 最新版
 UPDATE_REPO = "CQAllen/sensenova-usage-dashboard"
@@ -640,7 +640,7 @@ class AppApi(imagegen.ImageApi):
         返回实际动作，前端据此决定是否展示「已最小化到托盘」提示。
         """
         settings = accounts.load_settings()
-        if settings.get("close_behavior", "minimize") == "minimize" and tray.tray_available():
+        if settings.get("close_behavior", "exit") == "minimize" and tray.tray_available():
             window = webview.windows[0] if webview.windows else None
             tray.set_window_hidden(True)
             if window:
@@ -843,7 +843,7 @@ def main() -> None:
         if tray.exiting():
             return True
         settings = accounts.load_settings()
-        if settings.get("close_behavior", "minimize") == "minimize" and tray.tray_available():
+        if settings.get("close_behavior", "exit") == "minimize" and tray.tray_available():
             tray.set_window_hidden(True)
             threading.Thread(
                 target=_enter_background_mode, args=(window,), daemon=True

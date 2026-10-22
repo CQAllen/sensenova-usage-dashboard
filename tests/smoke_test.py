@@ -637,6 +637,9 @@ check("缺 username → 空预测", json.loads(req("GET", "/api/prediction")[1])
 # ============================================================
 section("12. 运行设置与托盘状态")
 
+check("默认关闭行为为退出", accounts.DEFAULT_SETTINGS["close_behavior"] == "exit",
+      accounts.DEFAULT_SETTINGS)
+
 # 合并语义：部分保存不得重置未提交字段
 accounts.save_settings({"refresh_seconds": 300, "close_behavior": "exit", "auto_start": True})
 part = accounts.save_settings({"refresh_seconds": 600})
@@ -686,7 +689,7 @@ check("settings 返回 monitor 状态",
       and all(k in _settings_body["monitor"]
               for k in ("paused", "background", "tray_available")), _settings_body)
 
-# close_window 分支：托盘不可用必须退出，默认必须隐藏且切后台模式
+# close_window 分支：托盘不可用必须退出；显式选择最小化才隐藏；默认退出
 _api = dashboard.AppApi()
 _orig_load = accounts.load_settings
 _orig_avail = dashboard.tray.tray_available
@@ -705,6 +708,7 @@ try:
     class _FakeWindow:
         def __init__(self):
             self.hidden = False
+            self.destroyed = False
             self.js = []
 
         def evaluate_js(self, script):
@@ -712,6 +716,9 @@ try:
 
         def hide(self):
             self.hidden = True
+
+        def destroy(self):
+            self.destroyed = True
 
     _fake = _FakeWindow()
     _hidden_flags = []
@@ -721,11 +728,20 @@ try:
     dashboard.tray.set_window_hidden = lambda v: _hidden_flags.append(v)
     dashboard.tray.start_bg_refresh = lambda secs=300: _bg_intervals.append(secs)
     _r = _api.close_window()
-    check("默认关闭 → 隐藏到托盘", _r["action"] == "hidden" and _fake.hidden, _r)
+    check("选择最小化 → 隐藏到托盘", _r["action"] == "hidden" and _fake.hidden, _r)
     check("隐藏前切后台模式", "setBackgroundMode(true)" in _fake.js, _fake.js)
     check("隐藏后按设置间隔启动后台刷新",
           _hidden_flags == [True] and _bg_intervals == [300],
           (_hidden_flags, _bg_intervals))
+
+    _fake2 = _FakeWindow()
+    dashboard.webview.windows = [_fake2]
+    accounts.load_settings = lambda: {"refresh_seconds": 300,
+                                      "close_behavior": "exit",
+                                      "auto_start": False}
+    _r = _api.close_window()
+    check("选择退出 → 直接销毁窗口",
+          _r["action"] == "exit" and _fake2.destroyed and not _fake2.hidden, _r)
 finally:
     accounts.load_settings = _orig_load
     dashboard.tray.tray_available = _orig_avail

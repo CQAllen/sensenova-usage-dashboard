@@ -22,7 +22,7 @@ BASE_DIR = credstore.resolve_config_dir()
 # 可持久化到配置文档的界面设置（与账号同文件，同样加密存储）
 AUTO_REFRESH_SECONDS = 300                  # 默认自动刷新间隔（秒）
 DEFAULT_SETTINGS = {"refresh_seconds": AUTO_REFRESH_SECONDS,
-                    "close_behavior": "minimize",   # minimize | exit
+                    "close_behavior": "exit",       # exit（默认）| minimize（最小化到托盘）
                     "auto_start": False}
 REFRESH_MIN, REFRESH_MAX = 60, 3600         # 自动刷新间隔允许范围
 

@@ -5,11 +5,56 @@ var refreshSec = 300;
 var countdown = refreshSec;
 var _backgroundMode = false;   // 窗口隐藏，由托盘后台循环负责刷新
 var _monitorPaused = false;    // 暂停监控：停用所有自动刷新
-var _closeBehavior = 'minimize';
+var _closeBehavior = 'exit';
 var _trayAvailable = false;
 var fetchBusy = false;   // 防止慢查询期间定时器 / 手动刷新并发发起，多个请求互相覆盖渲染
 var _updateUrl = null;   // 设置页加载时写入：发现新版本时的 release 页地址
 var _lastWarning = null; // 去重：同一条配置告警不重复弹
+
+// ---------- 版本公告 ----------
+var CHANGELOG = {
+  '1.2.1': {
+    date: '2026-10-22',
+    items: [
+      '系统托盘常驻：关闭窗口不退出，后台继续刷新用量，托盘图标按状态变色',
+      '用量历史与趋势：每次查询记录快照，折线图展示变化，预测额度耗尽时间',
+      '账号可用性分类：按积分池额度分为可用 / 降级 / 不可用，一眼掌握全局',
+      '自动更新：检测 GitHub Release 新版本，一键下载替换重启',
+      'UI 全面升级：浅色侧边栏、图标导航、Toast 通知、卡片边框阴影、CSS 设计令牌',
+      '账号管理整合：配置与 API Key 合并为可展开卡片，登录状态一目了然',
+      '侧边栏收起/展开：点击收起后只留图标，释放更多展示空间',
+      '安全加固：登录限流、413 排空、trust_env 禁代理、CSP 零内联脚本'
+    ]
+  }
+};
+
+function showVersionAnnouncement() {
+  var ver = window.__APP_VERSION__ || '1.2.1';
+  var cl = CHANGELOG[ver];
+  if (!cl) return;
+  // 已看过该版本则不弹
+  if (localStorage.getItem('_seenVersion_' + ver) === '1') return;
+
+  var overlay = document.createElement('div');
+  overlay.className = 'va-overlay';
+  var items = cl.items.map(function(t) { return '<li>' + escHtml(t) + '</li>'; }).join('');
+  overlay.innerHTML =
+    '<div class="va-card">' +
+      '<div class="va-header">' +
+        '<span class="va-version">v' + escHtml(ver) + ' 更新</span>' +
+        '<span class="va-date">' + escHtml(cl.date) + '</span>' +
+      '</div>' +
+      '<ul class="va-list">' + items + '</ul>' +
+      '<div class="va-actions">' +
+        '<button class="btn btn-primary va-ok">知道了</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  overlay.querySelector('.va-ok').onclick = function() {
+    localStorage.setItem('_seenVersion_' + ver, '1');
+    overlay.remove();
+  };
+}
 
 // ---------- Toast 通知 ----------
 function showToast(msg, type, ms) {
@@ -1371,10 +1416,11 @@ async function loadSettings() {
       throw new Error(ej.error || ('HTTP ' + resp.status));
     }
     var d = await resp.json();
+    window.__APP_VERSION__ = d.version || '1.2.1';
     refreshSec = (d.settings && d.settings.refresh_seconds) || 300;
     countdown = refreshSec;
     _monitorPaused = !!(d.monitor && d.monitor.paused);
-    _closeBehavior = (d.settings && d.settings.close_behavior) || 'minimize';
+    _closeBehavior = (d.settings && d.settings.close_behavior) || 'exit';
     _trayAvailable = !!(d.monitor && d.monitor.tray_available);
 
     var opts = '';
@@ -1399,7 +1445,7 @@ async function loadSettings() {
     h += '</div>';
 
     // 运行方式
-    var cb = d.settings && d.settings.close_behavior ? d.settings.close_behavior : 'minimize';
+    var cb = d.settings && d.settings.close_behavior ? d.settings.close_behavior : 'exit';
     var as = d.settings && d.settings.auto_start ? true : false;
     var monitor = d.monitor || {};
     var paused = !!monitor.paused;
@@ -1412,8 +1458,8 @@ async function loadSettings() {
     h += '<div class="settings-row"><span class="k">关闭窗口时</span>' +
          (trayOk
            ? '<select id="setCloseBehavior">' +
-             '<option value="minimize"' + (cb === 'minimize' ? ' selected' : '') + '>最小化到托盘</option>' +
              '<option value="exit"' + (cb === 'exit' ? ' selected' : '') + '>退出应用</option>' +
+             '<option value="minimize"' + (cb === 'minimize' ? ' selected' : '') + '>最小化到托盘（后台继续刷新）</option>' +
              '</select>'
            : '<span class="v">托盘不可用，关闭窗口将退出应用</span>') + '</div>';
     h += '<div class="settings-row"><span class="k">开机自启</span>' +
@@ -1690,5 +1736,18 @@ function initWindowControls() {
 
 initWindowControls();
 
-loadSettings().then(function() { return loadAccountManagement(); }).then(function() { fetchUsage(); });
+// 侧边栏收起/展开
+(function initNavToggle() {
+  var sidebar = document.querySelector('.sidebar');
+  var toggle = document.getElementById('navToggle');
+  if (!sidebar || !toggle) return;
+  // 恢复上次状态
+  if (localStorage.getItem('_navCollapsed') === '1') sidebar.classList.add('collapsed');
+  toggle.addEventListener('click', function() {
+    sidebar.classList.toggle('collapsed');
+    localStorage.setItem('_navCollapsed', sidebar.classList.contains('collapsed') ? '1' : '0');
+  });
+})();
+
+loadSettings().then(function() { showVersionAnnouncement(); return loadAccountManagement(); }).then(function() { fetchUsage(); });
 setInterval(tick, 1000);
