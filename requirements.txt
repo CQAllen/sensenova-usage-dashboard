@@ -2,3 +2,5 @@ requests==2.34.2
 pywebview==6.2.1
 jwcrypto==1.5.8
 cryptography==48.0.1
+pystray==0.19.5
+Pillow>=10.0.0

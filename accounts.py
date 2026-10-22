@@ -21,7 +21,9 @@ BASE_DIR = credstore.resolve_config_dir()
 
 # 可持久化到配置文档的界面设置（与账号同文件，同样加密存储）
 AUTO_REFRESH_SECONDS = 300                  # 默认自动刷新间隔（秒）
-DEFAULT_SETTINGS = {"refresh_seconds": AUTO_REFRESH_SECONDS}
+DEFAULT_SETTINGS = {"refresh_seconds": AUTO_REFRESH_SECONDS,
+                    "close_behavior": "minimize",   # minimize | exit
+                    "auto_start": False}
 REFRESH_MIN, REFRESH_MAX = 60, 3600         # 自动刷新间隔允许范围
 
 _accounts_lock = threading.Lock()
@@ -90,21 +92,48 @@ def load_settings() -> dict:
 
 
 def save_settings(incoming: dict) -> dict:
-    """校验并持久化设置，返回落盘后的设置。"""
+    """校验并持久化设置，返回落盘后的设置。
+
+    允许只提交部分字段：未提交的字段沿用已保存值，避免「只改刷新间隔」
+    把关闭行为、开机自启一并重置成默认值。
+    """
     if not isinstance(incoming, dict):
         raise ValueError("settings 必须是对象")
-    try:
-        secs = int(incoming.get("refresh_seconds") or 0)
-    except (TypeError, ValueError):
-        raise ValueError("refresh_seconds 必须是整数")
-    if not (REFRESH_MIN <= secs <= REFRESH_MAX):
-        raise ValueError(f"refresh_seconds 需在 {REFRESH_MIN}-{REFRESH_MAX} 秒之间")
+    if "refresh_seconds" in incoming:
+        try:
+            secs = int(incoming.get("refresh_seconds") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("refresh_seconds 必须是整数")
+        if not (REFRESH_MIN <= secs <= REFRESH_MAX):
+            raise ValueError(f"refresh_seconds 需在 {REFRESH_MIN}-{REFRESH_MAX} 秒之间")
+    else:
+        secs = None
 
     def _apply(doc):
-        settings = doc.get("settings")
-        if not isinstance(settings, dict):
-            settings = dict(DEFAULT_SETTINGS)
-        settings["refresh_seconds"] = secs
+        stored = doc.get("settings")
+        if not isinstance(stored, dict):
+            stored = {}
+        settings = dict(DEFAULT_SETTINGS)
+        # 只继承已知字段，忽略历史遗留或未知键
+        settings.update({k: v for k, v in stored.items() if k in DEFAULT_SETTINGS})
+
+        if secs is not None:
+            settings["refresh_seconds"] = secs
+        else:
+            try:
+                settings["refresh_seconds"] = int(settings["refresh_seconds"])
+            except (TypeError, ValueError):
+                settings["refresh_seconds"] = AUTO_REFRESH_SECONDS
+            settings["refresh_seconds"] = min(max(settings["refresh_seconds"],
+                                                  REFRESH_MIN), REFRESH_MAX)
+
+        if "close_behavior" in incoming:
+            cb = incoming.get("close_behavior")
+            if cb in ("minimize", "exit"):
+                settings["close_behavior"] = cb
+        if "auto_start" in incoming:
+            settings["auto_start"] = bool(incoming.get("auto_start"))
+
         doc["settings"] = settings
         return settings
 

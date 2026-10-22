@@ -59,8 +59,10 @@ VSVersionInfo(
          StringStruct('LegalCopyright', 'Copyright (C) 2026'),
          StringStruct('OriginalFilename', 'SenseNova用量查询.exe'),
          StringStruct('ProductName', 'SenseNova 用量查询'),
-         StringStruct('ProductVersion', '{APP_VERSION}.0')])
-      ]),
+         StringStruct('ProductVersion', '{APP_VERSION}.0')]
+      )
+      ]
+    ),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])
   ]
 )

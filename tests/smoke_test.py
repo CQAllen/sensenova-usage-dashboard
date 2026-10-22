@@ -633,6 +633,107 @@ check("未保存的账号 → 空预测",
 check("缺 username → 空预测", json.loads(req("GET", "/api/prediction")[1])["predictions"] == [])
 
 # ============================================================
+# 12. 运行设置与托盘状态
+# ============================================================
+section("12. 运行设置与托盘状态")
+
+# 合并语义：部分保存不得重置未提交字段
+accounts.save_settings({"refresh_seconds": 300, "close_behavior": "exit", "auto_start": True})
+part = accounts.save_settings({"refresh_seconds": 600})
+check("部分保存保留 close_behavior", part["close_behavior"] == "exit", part)
+check("部分保存保留 auto_start", part["auto_start"] is True, part)
+check("部分保存更新刷新间隔", part["refresh_seconds"] == 600, part)
+part2 = accounts.save_settings({"close_behavior": "bogus"})
+check("非法 close_behavior 不覆盖旧值", part2["close_behavior"] == "exit", part2)
+check("非法 close_behavior 不影响刷新间隔", part2["refresh_seconds"] == 600, part2)
+try:
+    accounts.save_settings({"refresh_seconds": 5})
+    check("刷新间隔越界应报错", False)
+except ValueError:
+    check("刷新间隔越界应报错", True)
+
+# 自启命令：路径必须加引号，并带 --hidden
+startup_cmd = dashboard.tray._auto_start_command()
+check("自启命令带 --hidden", "--hidden" in startup_cmd, startup_cmd)
+check("自启命令路径加引号", startup_cmd.count('"') >= 2, startup_cmd)
+
+# 托盘状态映射：错误 > 告警 > 正常
+_orig_set_status = dashboard.tray._set_status
+_status_seen = []
+dashboard.tray._set_status = lambda status, tooltip=None: _status_seen.append(status)
+try:
+    dashboard.tray.update_from_result({"accounts": []})
+    dashboard.tray.update_from_result(
+        {"accounts": [{"username": "a", "error": "登录失败", "items": []}]})
+    dashboard.tray.update_from_result(
+        {"accounts": [{"username": "a", "error": None,
+                       "items": [{"usage_pct_5h": 100, "usage_pct_7d": 10}]}]})
+    dashboard.tray.update_from_result(
+        {"accounts": [{"username": "a", "error": None,
+                       "items": [{"usage_pct_5h": 50, "usage_pct_7d": 10}]}]})
+finally:
+    dashboard.tray._set_status = _orig_set_status
+check("托盘状态：无账号 → normal", _status_seen[0] == "normal", _status_seen)
+check("托盘状态：查询失败 → error", _status_seen[1] == "error", _status_seen)
+check("托盘状态：额度耗尽 → alert", _status_seen[2] == "alert", _status_seen)
+check("托盘状态：正常 → normal", _status_seen[3] == "normal", _status_seen)
+
+# 设置接口带监控状态，供设置页展示与暂停按钮
+_st, bd, _ = req("GET", "/api/settings")
+_settings_body = json.loads(bd)
+check("settings 返回 monitor 状态",
+      isinstance(_settings_body.get("monitor"), dict)
+      and all(k in _settings_body["monitor"]
+              for k in ("paused", "background", "tray_available")), _settings_body)
+
+# close_window 分支：托盘不可用必须退出，默认必须隐藏且切后台模式
+_api = dashboard.AppApi()
+_orig_load = accounts.load_settings
+_orig_avail = dashboard.tray.tray_available
+_orig_hidden = dashboard.tray.set_window_hidden
+_orig_bg = dashboard.tray.start_bg_refresh
+_orig_windows = dashboard.webview.windows
+try:
+    accounts.load_settings = lambda: {"refresh_seconds": 300,
+                                      "close_behavior": "minimize",
+                                      "auto_start": False}
+    dashboard.tray.tray_available = lambda: False
+    _r = _api.close_window()
+    check("托盘不可用 → 关闭即退出",
+          _r["action"] == "exit" and _r["tray_available"] is False, _r)
+
+    class _FakeWindow:
+        def __init__(self):
+            self.hidden = False
+            self.js = []
+
+        def evaluate_js(self, script):
+            self.js.append(script)
+
+        def hide(self):
+            self.hidden = True
+
+    _fake = _FakeWindow()
+    _hidden_flags = []
+    _bg_intervals = []
+    dashboard.webview.windows = [_fake]
+    dashboard.tray.tray_available = lambda: True
+    dashboard.tray.set_window_hidden = lambda v: _hidden_flags.append(v)
+    dashboard.tray.start_bg_refresh = lambda secs=300: _bg_intervals.append(secs)
+    _r = _api.close_window()
+    check("默认关闭 → 隐藏到托盘", _r["action"] == "hidden" and _fake.hidden, _r)
+    check("隐藏前切后台模式", "setBackgroundMode(true)" in _fake.js, _fake.js)
+    check("隐藏后按设置间隔启动后台刷新",
+          _hidden_flags == [True] and _bg_intervals == [300],
+          (_hidden_flags, _bg_intervals))
+finally:
+    accounts.load_settings = _orig_load
+    dashboard.tray.tray_available = _orig_avail
+    dashboard.tray.set_window_hidden = _orig_hidden
+    dashboard.tray.start_bg_refresh = _orig_bg
+    dashboard.webview.windows = _orig_windows
+
+# ============================================================
 # 收尾
 # ============================================================
 dashboard._server.shutdown()

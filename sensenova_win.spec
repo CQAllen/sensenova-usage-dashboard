@@ -10,7 +10,7 @@ hiddenimports = [
     'requests', 'jwcrypto', 'cryptography',
     'auth_login', 'credstore', 'accounts', 'sensenova_api', 'imagegen', 'history',
 ]
-for pkg in ('webview', 'pythonnet', 'clr_loader'):
+for pkg in ('webview', 'pythonnet', 'clr_loader', 'pystray', 'PIL'):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b

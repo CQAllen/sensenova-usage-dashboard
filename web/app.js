@@ -3,6 +3,10 @@ var AUTH_TOKEN = "__AUTH_TOKEN__";
 var REFRESH_OPTIONS = [[60,'1 分钟'],[300,'5 分钟'],[600,'10 分钟'],[900,'15 分钟'],[1800,'30 分钟']];
 var refreshSec = 300;
 var countdown = refreshSec;
+var _backgroundMode = false;   // 窗口隐藏，由托盘后台循环负责刷新
+var _monitorPaused = false;    // 暂停监控：停用所有自动刷新
+var _closeBehavior = 'minimize';
+var _trayAvailable = false;
 var fetchBusy = false;   // 防止慢查询期间定时器 / 手动刷新并发发起，多个请求互相覆盖渲染
 var _updateUrl = null;   // 设置页加载时写入：发现新版本时的 release 页地址
 var _lastWarning = null; // 去重：同一条配置告警不重复弹
@@ -23,6 +27,28 @@ function showToast(msg, type, ms) {
   c.appendChild(t);
   function dismiss() { t.classList.add('toast-out'); setTimeout(function() { t.remove(); }, 200); }
   setTimeout(dismiss, ms);
+}
+
+// 首次最小化提示：告知已驻留托盘，并提供「不再提示」
+function showFirstMinimizeTip(onDone) {
+  var overlay = document.createElement('div');
+  overlay.className = 'fm-overlay';
+  overlay.innerHTML =
+    '<div class="fm-card">' +
+      '<div class="fm-title">已最小化到托盘</div>' +
+      '<div class="fm-text">窗口将隐藏到系统托盘，应用继续在后台刷新用量。' +
+      '可点击托盘图标随时重新打开。</div>' +
+      '<label class="fm-check"><input type="checkbox" class="fm-never"> 不再提示</label>' +
+      '<div class="fm-actions"><button class="btn btn-primary btn-sm fm-ok">知道了</button></div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  overlay.querySelector('.fm-ok').onclick = function() {
+    if (overlay.querySelector('.fm-never').checked) {
+      localStorage.setItem('_firstMinimize', '1');
+    }
+    overlay.remove();
+    if (onDone) onDone();
+  };
 }
 
 // ---------- 按钮 busy 态 ----------
@@ -1347,6 +1373,9 @@ async function loadSettings() {
     var d = await resp.json();
     refreshSec = (d.settings && d.settings.refresh_seconds) || 300;
     countdown = refreshSec;
+    _monitorPaused = !!(d.monitor && d.monitor.paused);
+    _closeBehavior = (d.settings && d.settings.close_behavior) || 'minimize';
+    _trayAvailable = !!(d.monitor && d.monitor.tray_available);
 
     var opts = '';
     REFRESH_OPTIONS.forEach(function(o) {
@@ -1367,6 +1396,28 @@ async function loadSettings() {
     h += '<div class="settings-row"><span class="k">配置目录</span><span class="v">' + escHtml(d.config_dir) + '</span></div>';
     h += '<div class="settings-row"><span class="k">数据来源</span><span class="v">' + escHtml(d.api_base) + '</span></div>';
     h += '<div class="settings-row"><span class="k">本地服务</span><span class="v">127.0.0.1:' + escHtml(d.port) + '</span></div>';
+    h += '</div>';
+
+    // 运行方式
+    var cb = d.settings && d.settings.close_behavior ? d.settings.close_behavior : 'minimize';
+    var as = d.settings && d.settings.auto_start ? true : false;
+    var monitor = d.monitor || {};
+    var paused = !!monitor.paused;
+    var trayOk = !!monitor.tray_available;
+    var stateText = paused ? '已暂停' : (monitor.background ? '后台监控中（窗口已隐藏）' : '监控中');
+    h += '<div class="settings-card"><h3 class="settings-title">运行方式</h3>';
+    h += '<div class="settings-row"><span class="k">当前状态</span><span class="v">' + stateText + '</span>' +
+         (trayOk ? '<button class="btn btn-sm" data-action="toggleMonitor">' +
+                   (paused ? '恢复监控' : '暂停监控') + '</button>' : '') + '</div>';
+    h += '<div class="settings-row"><span class="k">关闭窗口时</span>' +
+         (trayOk
+           ? '<select id="setCloseBehavior">' +
+             '<option value="minimize"' + (cb === 'minimize' ? ' selected' : '') + '>最小化到托盘</option>' +
+             '<option value="exit"' + (cb === 'exit' ? ' selected' : '') + '>退出应用</option>' +
+             '</select>'
+           : '<span class="v">托盘不可用，关闭窗口将退出应用</span>') + '</div>';
+    h += '<div class="settings-row"><span class="k">开机自启</span>' +
+         '<label class="ig-check"><input type="checkbox" id="setAutoStart"' + (as ? ' checked' : '') + '> 登录系统时自动启动</label></div>';
     h += '</div>';
 
     h += '<div class="settings-card"><h3 class="settings-title">安全状态</h3><ul class="sec-list">' +
@@ -1399,6 +1450,33 @@ async function loadSettings() {
          '<div class="settings-row"><span class="k">说明</span><span class="v">仅在本机运行，凭据不上传；JWT 过期后会用保存的账号密码自动重登。</span></div></div>';
 
     box.innerHTML = h;
+
+    // 关闭行为 select：改了立即保存
+    var cbSel = document.getElementById('setCloseBehavior');
+    if (cbSel) cbSel.onchange = async function() {
+      try {
+        var resp = await apiFetch('/api/settings', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({refresh_seconds: parseInt(document.getElementById('setRefresh').value, 10) || 300,
+                                close_behavior: cbSel.value})
+        });
+        var d = await resp.json();
+        if (d.success) {
+          _closeBehavior = cbSel.value;
+          showToast('已切换为' + (cbSel.value === 'minimize' ? '最小化到托盘' : '退出应用'), 'success');
+        } else showToast('保存失败', 'error');
+      } catch(e) { showToast('保存失败', 'error'); }
+    };
+
+    // 开机自启 checkbox
+    var asCb = document.getElementById('setAutoStart');
+    if (asCb) asCb.onchange = async function() {
+      try {
+        var r = await window.pywebview.api.set_auto_start(asCb.checked);
+        if (r && r.ok) showToast(asCb.checked ? '已开启开机自启' : '已关闭开机自启', 'success');
+        else { asCb.checked = !asCb.checked; showToast('设置失败: ' + (r && r.error ? r.error : '未知'), 'error'); }
+      } catch(e) { asCb.checked = !asCb.checked; showToast('设置失败', 'error'); }
+    };
   } catch(e) {
     box.innerHTML = '<div class="tip tip-error">加载失败: ' + escHtml(e.message) + '</div>';
   }
@@ -1419,12 +1497,30 @@ async function saveSettings() {
       refreshSec = d.settings.refresh_seconds;
       countdown = refreshSec;
       renderCountdown();
+      // 后台隐藏态时同步托盘循环的间隔
+      try {
+        if (window.pywebview && window.pywebview.api && window.pywebview.api.set_refresh_interval) {
+          window.pywebview.api.set_refresh_interval(refreshSec);
+        }
+      } catch (e) { /* 非桌面环境忽略 */ }
       var s = document.getElementById('settingsStatus');
       if (s) { s.classList.add('show'); setTimeout(function() { s.classList.remove('show'); }, 2000); }
       showToast('设置已保存', 'success');
     } else { showToast('保存失败: ' + (d.error || ''), 'error'); }
   } catch(e) { showToast('保存失败: ' + e.message, 'error'); }
   finally { done(); }
+}
+
+async function toggleMonitoring() {
+  try {
+    var r = await window.pywebview.api.toggle_monitoring();
+    if (r && typeof r.paused === 'boolean') {
+      _monitorPaused = r.paused;
+      loadSettings();
+    }
+  } catch(e) {
+    showToast('操作失败: ' + e.message, 'error');
+  }
 }
 
 async function clearHistory() {
@@ -1449,6 +1545,8 @@ function renderCountdown() {
 
 function tick() {
   updateResetCells();
+  // 隐藏到托盘时由后端循环刷新；暂停监控时两者都停，避免重复或违背暂停语义
+  if (_backgroundMode || _monitorPaused) return;
   countdown--;
   if (countdown <= 0) {
     // 先复位再发请求：查询较慢（如多账号自动重登）时在途期间 countdown 会持续为负，
@@ -1458,6 +1556,29 @@ function tick() {
     return;
   }
   renderCountdown();
+}
+
+// 由桌面端调用：切换前后台模式（隐藏时停前端定时器，显示时恢复并刷新一次）
+function setBackgroundMode(on) {
+  _backgroundMode = !!on;
+  if (!_backgroundMode) {
+    if (!_monitorPaused) countdown = refreshSec;
+    renderCountdown();
+    fetchUsage();
+  }
+}
+
+// 由桌面端调用：暂停 / 恢复监控
+function setMonitoringPaused(on) {
+  _monitorPaused = !!on;
+  if (!_monitorPaused) {
+    countdown = refreshSec;
+    renderCountdown();
+    if (!_backgroundMode) fetchUsage();
+    showToast('监控已恢复', 'success');
+  } else {
+    showToast('监控已暂停', 'info');
+  }
 }
 
 // API Key 的「显示 / 复制」用事件委托，避免每次重绘都要重新绑定
@@ -1518,6 +1639,7 @@ document.addEventListener('click', function(ev) {
     case 'cancelImage': cancelImage(); break;
     case 'downloadImage': downloadImage(); break;
     case 'saveSettings': saveSettings(); break;
+    case 'toggleMonitor': toggleMonitoring(); break;
     case 'clearHistory': clearHistory(); break;
     case 'openUpdate': if (_updateUrl) openUpdateUrl(_updateUrl); break;
     case 'performUpdate': performUpdate(); break;
@@ -1539,7 +1661,14 @@ function initWindowControls() {
   }
 
   if (minBtn) minBtn.addEventListener('click', function() { callApi('minimize_window'); });
-  if (closeBtn) closeBtn.addEventListener('click', function() { callApi('close_window'); });
+  if (closeBtn) closeBtn.addEventListener('click', function() {
+    function doClose() { callApi('close_window'); }
+    if (_closeBehavior === 'minimize' && _trayAvailable && !localStorage.getItem('_firstMinimize')) {
+      showFirstMinimizeTip(doClose);
+    } else {
+      doClose();
+    }
+  });
 
   if (maxBtn) {
     maxBtn.addEventListener('click', function() {

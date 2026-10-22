@@ -317,6 +317,14 @@ td.refresh-cell { white-space: nowrap; }
 @keyframes toast-in { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes toast-out { to { opacity: 0; transform: translateX(20px); } }
 
+/* ---------- 首次最小化提示 ---------- */
+.fm-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.35); display: flex; align-items: center; justify-content: center; z-index: 10000; }
+.fm-card { width: 360px; max-width: calc(100vw - 48px); background: var(--bg-card); border-radius: var(--radius-lg); box-shadow: var(--shadow-image); padding: 20px; }
+.fm-title { font-size: var(--font-lg); font-weight: 600; margin-bottom: 8px; }
+.fm-text { font-size: var(--font-sm); color: var(--text-secondary); line-height: 1.6; }
+.fm-check { display: flex; align-items: center; gap: 6px; margin-top: 14px; font-size: var(--font-sm); color: var(--text-secondary); cursor: pointer; }
+.fm-actions { display: flex; justify-content: flex-end; margin-top: 14px; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }

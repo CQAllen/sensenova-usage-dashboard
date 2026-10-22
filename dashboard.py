@@ -41,6 +41,7 @@ import auth_login
 import accounts
 import sensenova_api
 import imagegen
+import tray
 
 
 def _fatal(title: str, message: str) -> None:
@@ -272,6 +273,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             try:
                 result = sensenova_api.query_all_accounts()
+                # 窗口内刷新也同步托盘状态，保证两处用同一份结果
+                tray.update_from_result(result)
                 warnings = accounts.pop_config_warnings()
                 if warnings:
                     result["warning"] = " ".join(warnings)
@@ -293,6 +296,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 self._send_json(200, {
                     "settings": accounts.load_settings(),
+                    "monitor": {
+                        "paused": tray.is_paused(),
+                        "background": tray.is_background(),
+                        "tray_available": tray.tray_available(),
+                    },
                     "config_dir": accounts.BASE_DIR,
                     "api_base": sensenova_api.API_BASE,
                     "port": _server_port,
@@ -577,6 +585,17 @@ def _start_update_check() -> None:
     threading.Thread(target=_check_update, daemon=True).start()
 
 
+def _enter_background_mode(window) -> None:
+    """通知前端进入后台模式（停掉前端定时器，交给托盘后台循环刷新）。
+
+    只能在非 UI 线程调用：EdgeChromium 的 evaluate_js 会阻塞等待回调回到 UI 线程。
+    """
+    try:
+        window.evaluate_js("setBackgroundMode(true)")
+    except Exception:
+        pass
+
+
 # ============================================================
 # 主流程
 # ============================================================
@@ -616,8 +635,57 @@ class AppApi(imagegen.ImageApi):
         return AppApi._maximized
 
     def close_window(self):
+        """关闭窗口：默认隐藏到托盘，设置改为退出（或托盘不可用）则真正退出。
+
+        返回实际动作，前端据此决定是否展示「已最小化到托盘」提示。
+        """
+        settings = accounts.load_settings()
+        if settings.get("close_behavior", "minimize") == "minimize" and tray.tray_available():
+            window = webview.windows[0] if webview.windows else None
+            tray.set_window_hidden(True)
+            if window:
+                # 先停前端定时器，避免与后台刷新并发请求（js_api 在独立线程，直接调用安全）
+                _enter_background_mode(window)
+                try:
+                    window.hide()
+                except Exception:
+                    pass
+            tray.start_bg_refresh(settings.get("refresh_seconds", 300))
+            return {"action": "hidden"}
+        self.exit_app()
+        return {"action": "exit", "tray_available": tray.tray_available()}
+
+    def exit_app(self):
+        """真正退出：停托盘 + 停后台刷新 + 销毁窗口。"""
+        tray.request_exit()
+        tray.stop_bg_refresh_now()
+        tray.stop_tray()
         if webview.windows:
             webview.windows[0].destroy()
+
+    def set_auto_start(self, enabled):
+        """开机自启开关：写注册表并持久化设置，失败时回滚。"""
+        enabled = bool(enabled)
+        ok, err = tray.set_auto_start(enabled)
+        if not ok:
+            return {"ok": False, "error": err}
+        try:
+            accounts.save_settings({"auto_start": enabled})
+        except Exception as e:
+            # 设置没落盘就回滚注册表，避免开关显示与实际不一致
+            tray.set_auto_start(not enabled)
+            return {"ok": False, "error": accounts.sanitize_error(e)}
+        return {"ok": True, "error": None}
+
+    def toggle_monitoring(self):
+        """设置页暂停 / 恢复监控。"""
+        tray.toggle_pause()
+        return {"paused": tray.is_paused()}
+
+    def set_refresh_interval(self, seconds):
+        """设置页保存刷新间隔后，同步后台循环的间隔。"""
+        tray.update_interval(seconds)
+        return {"ok": True}
 
     def download_and_update(self):
         """从 GitHub Release 下载新版 exe → 生成批处理交换 → 启动 → 退出当前进程。
@@ -696,12 +764,19 @@ class AppApi(imagegen.ImageApi):
             return {"ok": False, "error": f"启动更新脚本失败: {accounts.sanitize_error(e, 120)}"}
 
         # ---- 退出当前进程，批处理接管 ----
+        tray.request_exit()
+        tray.stop_bg_refresh_now()
+        tray.stop_tray()
         if webview.windows:
             webview.windows[0].destroy()
         return {"ok": True}
 
 
 def main() -> None:
+    # 单实例检查：重复启动提示并退出
+    if not tray.check_single_instance():
+        sys.exit(0)
+
     # 各模块的 logger 统一落盘到配置目录：pythonw 无控制台，不写文件则告警不可见
     try:
         os.makedirs(accounts.BASE_DIR, exist_ok=True)
@@ -712,6 +787,11 @@ def main() -> None:
         )
     except Exception:
         pass
+
+    # 初始化系统托盘（失败则静默降级，关闭行为回退为退出）
+    tray.init_tray()
+    # 监听「唤起窗口」事件：重复启动的第二个实例通过它唤醒本实例
+    tray.start_show_listener()
 
     # 启动后台 HTTP 服务
     server_thread = threading.Thread(target=start_server, daemon=True)
@@ -739,7 +819,7 @@ def main() -> None:
 
     # 创建原生窗口（无边框，自定义标题栏）
     # 宽度需保证「各账号使用情况」7 列表头不换行：7 列约 1010px + 卡片内边距 36px + 菜单 170px + 外边距 32px ≈ 1248px
-    webview.create_window(
+    window = webview.create_window(
         title="SenseNova 用量查询",
         url=url,
         width=1440,
@@ -751,7 +831,51 @@ def main() -> None:
         js_api=AppApi(),
     )
 
-    # 启动窗口（阻塞，关闭窗口即退出程序）
+    start_hidden = "--hidden" in sys.argv
+
+    def _on_closing(*_args):
+        """拦截系统关闭（Alt+F4/任务栏），按设置隐藏到托盘而非退出。
+
+        注意：closing 事件是 should_lock 事件，本函数在 UI 线程同步执行。
+        EdgeChromium 的 evaluate_js 会阻塞等待回调调度回 UI 线程，直接调用会死锁，
+        因此放到后台线程 fire-and-forget。
+        """
+        if tray.exiting():
+            return True
+        settings = accounts.load_settings()
+        if settings.get("close_behavior", "minimize") == "minimize" and tray.tray_available():
+            tray.set_window_hidden(True)
+            threading.Thread(
+                target=_enter_background_mode, args=(window,), daemon=True
+            ).start()
+            try:
+                window.hide()
+            except Exception:
+                pass
+            tray.start_bg_refresh(settings.get("refresh_seconds", 300))
+            return False  # 取消销毁
+        return True
+
+    def _on_loaded(*_args):
+        """--hidden 启动（开机自启）时直接驻留托盘。"""
+        if not start_hidden:
+            return
+        if not tray.tray_available():
+            # 托盘不可用还隐藏会导致窗口无法找回，保持可见更安全
+            return
+        tray.set_window_hidden(True)
+        try:
+            window.hide()
+        except Exception:
+            pass
+        # loaded 事件非锁定，本函数已在后台线程执行
+        _enter_background_mode(window)
+        tray.start_bg_refresh(accounts.load_settings().get("refresh_seconds", 300))
+
+    window.events.closing += _on_closing
+    window.events.loaded += _on_loaded
+
+    # 启动窗口（阻塞；窗口销毁后退出程序）
     webview.start()
 
     # 窗口关闭后退出
